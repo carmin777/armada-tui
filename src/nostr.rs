@@ -162,7 +162,7 @@ pub struct Keys {
 
 /// Aceita `nsec1…` (bech32) ou hex de 64 chars.
 pub fn parse_secret(input: &str) -> anyhow::Result<Keys> {
-    use bech32::FromBase32;
+    use bech32::{FromBase32, ToBase32};
     let v = input.trim();
     let raw: [u8; 32] = if v.starts_with("nsec1") {
         let (hrp, data, _variant) = bech32::decode(v)?;
@@ -187,7 +187,7 @@ pub fn parse_secret(input: &str) -> anyhow::Result<Keys> {
     let pubkey_hex = format!("{xonly}");
     let npub = bech32::encode(
         "npub",
-        xonly.serialize().to_base32(),
+        xonly.serialize()[..].to_base32(),
         bech32::Variant::Bech32,
     )?;
     Ok(Keys {
@@ -215,7 +215,7 @@ pub fn sign_event(
     let serialized = serde_json::to_string(&commit)?;
     let digest = sha2::Sha256::digest(serialized.as_bytes());
     let msg = secp256k1::Message::from_digest(digest.into());
-    let sig = secp.sign_schnorr(&msg, &kp);
+    let sig = secp.sign_schnorr_no_aux_rand(&msg, &kp);
     Ok(serde_json::json!({
         "id": hex::encode(digest),
         "pubkey": pubkey,
@@ -248,7 +248,11 @@ pub fn publish(
     std::thread::spawn(move || {
         let out = (|| -> anyhow::Result<String> {
             let (mut socket, _) = tungstenite::connect(url.clone())?;
-            let send_auth = |socket: &mut _, challenge: &str| -> anyhow::Result<()> {
+            let send_auth = |socket: &mut tungstenite::WebSocket<
+                tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
+            >,
+                             challenge: &str|
+             -> anyhow::Result<()> {
                 let k = keys.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("relay pediu NIP-42 mas não há chave (faça login com nsec)")
                 })?;

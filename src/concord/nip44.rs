@@ -38,7 +38,7 @@ fn xonly_pubkey(hex36: &str) -> anyhow::Result<secp256k1::XOnlyPublicKey> {
 fn ecdh_x(secret: &[u8; 32], peer_hex: &str) -> anyhow::Result<[u8; 32]> {
     let sk = secp256k1::SecretKey::from_slice(secret)?;
     let xonly = xonly_pubkey(peer_hex)?;
-    let pk = secp256k1::PublicKey::from_x_only_public_key(xonly, secp256k1::Parity::Even)?;
+    let pk = secp256k1::PublicKey::from_x_only_public_key(xonly, secp256k1::Parity::Even);
     let point = secp256k1::ecdh::shared_secret_point(&pk, &sk);
     Ok(point[..32].try_into().expect("x tem 32 bytes"))
 }
