@@ -5,7 +5,7 @@
 //! Detecção: Kitty define KITTY_WINDOW_ID / TERM=xterm-kitty; WezTerm e
 //! Ghostty também falam o protocolo.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 pub fn supported() -> bool {
@@ -28,7 +28,8 @@ pub fn fetch_png(url: &str) -> anyhow::Result<Vec<u8>> {
     if !(ct.is_empty() || ct.contains("image/png") || ct.contains("octet-stream")) {
         anyhow::bail!("content-type não é PNG: {ct}");
     }
-    let bytes = res.into_bytes()?;
+    let mut bytes = Vec::new();
+    res.into_reader().read_to_end(&mut bytes)?;
     if bytes.len() > 8_000_000 {
         anyhow::bail!("imagem > 8 MiB, recusada no MVP");
     }
