@@ -303,8 +303,7 @@ pub fn fetch_participants(relay_url: &str, group_id: &str) -> anyhow::Result<Vec
     evs.sort_by_key(|e| e.created_at);
     Ok(evs
         .into_iter()
-        .rev()
-        .next()
+        .next_back()
         .map(|e| parse_participants(&e))
         .unwrap_or_default())
 }
