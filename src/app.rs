@@ -11,11 +11,12 @@ pub enum Screen {
     Projects,
     Inbox,
     Settings,
+    Parity,
     Help,
 }
 
 impl Screen {
-    pub fn all() -> [Screen; 8] {
+    pub fn all() -> [Screen; 9] {
         [
             Screen::Welcome,
             Screen::Server,
@@ -24,6 +25,7 @@ impl Screen {
             Screen::Projects,
             Screen::Inbox,
             Screen::Settings,
+            Screen::Parity,
             Screen::Help,
         ]
     }
@@ -37,6 +39,7 @@ impl Screen {
             Screen::Projects => "5 Projetos",
             Screen::Inbox => "6 Inbox",
             Screen::Settings => "7 Settings",
+            Screen::Parity => "8 Paridade",
             Screen::Help => "? Ajuda",
         }
     }

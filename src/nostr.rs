@@ -372,3 +372,37 @@ pub fn send_join(relay_url: &str, keys: &Keys, group_id: &str) -> anyhow::Result
     )?;
     publish(relay_url, Some(keys), ev, Duration::from_secs(20))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_vetor_nsec() {
+        // Vetor gerado pelo nostr-tools (secret 0x01).
+        let k = parse_secret("nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl")
+            .unwrap();
+        assert_eq!(
+            k.pubkey_hex,
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+        assert_eq!(
+            k.npub,
+            "npub10xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqpkge6d"
+        );
+        // Hex equivalente dá o mesmo.
+        let k2 = parse_secret("0000000000000000000000000000000000000000000000000000000000000001")
+            .unwrap();
+        assert_eq!(k2.pubkey_hex, k.pubkey_hex);
+        // Lixo rejeitado.
+        assert!(parse_secret("nsec1xyz").is_err());
+        assert!(parse_secret("00").is_err());
+    }
+
+    #[test]
+    fn generate_valido() {
+        let k = generate().unwrap();
+        assert_eq!(k.pubkey_hex.len(), 64);
+        assert!(k.npub.starts_with("npub1"));
+    }
+}

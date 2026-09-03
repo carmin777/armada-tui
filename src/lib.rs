@@ -4,4 +4,5 @@ pub mod kitty;
 pub mod mock;
 pub mod models;
 pub mod nostr;
+pub mod parity;
 pub mod ui;

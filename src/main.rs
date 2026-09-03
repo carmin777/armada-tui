@@ -194,6 +194,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('5') => app.goto(Screen::Projects),
         KeyCode::Char('6') => app.goto(Screen::Inbox),
         KeyCode::Char('7') => app.goto(Screen::Settings),
+        KeyCode::Char('8') => app.goto(Screen::Parity),
         KeyCode::Tab => app.cycle_focus(),
         KeyCode::Up | KeyCode::Char('k') => app.move_up(),
         KeyCode::Down | KeyCode::Char('j') => app.move_down(),

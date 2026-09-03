@@ -2,11 +2,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{
+        Block, Borders, Cell, Gauge, List, ListItem, ListState, Paragraph, Row, Table, Tabs, Wrap,
+    },
     Frame,
 };
 
 use crate::app::{App, Focus, Screen};
+use crate::parity;
 
 fn screen_index(s: Screen) -> usize {
     Screen::all().iter().position(|x| *x == s).unwrap_or(0)
@@ -49,11 +52,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Screen::Projects => render_projects(f, app, chunks[1]),
         Screen::Inbox => render_inbox(f, app, chunks[1]),
         Screen::Settings => render_settings(f, app, chunks[1]),
+        Screen::Parity => render_parity(f, chunks[1]),
         Screen::Help => render_help(f, app, chunks[1]),
     }
 
     let status = format!(
-        " {} | {} | {} | q sair · 1-7 telas · r grupos · m msgs · v imagem · ? ajuda ",
+        " {} | {} | {} | q sair · 1-8 telas · r grupos · m msgs · v imagem · ? ajuda ",
         app.npub,
         app.status,
         voice_note()
@@ -343,9 +347,72 @@ fn render_settings(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     );
 }
 
+fn render_parity(f: &mut Frame, area: ratatui::layout::Rect) {
+    let fs = parity::load();
+    let s = parity::summarize(&fs);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+    let g = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            " paridade {}% · done {} · partial {} · missing {} · fora-escopo {} ",
+            s.percent(),
+            s.done,
+            s.partial,
+            s.missing,
+            s.out_of_scope
+        )))
+        .gauge_style(Style::default().fg(Color::Green))
+        .percent(s.percent());
+    f.render_widget(g, chunks[0]);
+
+    let rows: Vec<Row> = fs
+        .iter()
+        .map(|feat| {
+            let (st, col) = match feat.status.as_str() {
+                "done" => ("done", Color::Green),
+                "partial" => ("partial", Color::Yellow),
+                "missing" => ("missing", Color::Red),
+                _ => ("fora", Color::Gray),
+            };
+            Row::new(vec![
+                Cell::from(feat.id.clone()),
+                Cell::from(feat.area.clone()),
+                Cell::from(Span::styled(
+                    st,
+                    Style::default().fg(col).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(feat.evidence.clone()),
+                Cell::from(feat.tui.clone()),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(22),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Min(0),
+        ],
+    )
+    .header(
+        Row::new(vec!["feature", "área", "status", "evidência", "tui faz"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" paridade x Electron (parity.json) "),
+    );
+    f.render_widget(table, chunks[1]);
+}
+
 fn render_help(f: &mut Frame, _app: &mut App, area: ratatui::layout::Rect) {
     let text = vec![
-        Line::from("q sair · 1-7 trocar tela · ? ajuda"),
+        Line::from("q sair · 1-8 trocar tela · ? ajuda"),
         Line::from("Tab alterna foco (frota → canais → mensagens)"),
         Line::from("j/k ou ↑/↓ navegar · i digitar · Enter enviar · Esc cancelar"),
         Line::from("r grupos NIP-29 · m msgs (Concord com chave = descriptografa E2EE)"),
