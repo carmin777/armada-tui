@@ -119,6 +119,7 @@ dependencies = [
  "sha2",
  "tungstenite",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]
