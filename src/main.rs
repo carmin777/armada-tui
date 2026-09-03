@@ -1,4 +1,5 @@
 mod app;
+mod concord;
 mod kitty;
 mod mock;
 mod models;
@@ -67,6 +68,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             match op {
                 app::PendingOp::Groups => app.fetch_live_groups(),
                 app::PendingOp::Messages => app.fetch_live_messages(),
+                app::PendingOp::Send => app.do_send(),
+                app::PendingOp::Join => app.do_join(),
             }
             continue;
         }
@@ -216,6 +219,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     Some(url) => app.view_url = Some(url),
                     None => app.status = "nenhuma URL nas mensagens visíveis".to_string(),
                 }
+            }
+        }
+        KeyCode::Char('J') => {
+            if app.screen == Screen::Server {
+                app.status = "enviando join 9021…".to_string();
+                app.pending = Some(app::PendingOp::Join);
             }
         }
         _ => {}

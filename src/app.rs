@@ -55,6 +55,8 @@ pub enum Focus {
 pub enum PendingOp {
     Groups,
     Messages,
+    Send,
+    Join,
 }
 
 pub struct App {
@@ -78,6 +80,8 @@ pub struct App {
     pub discover: Vec<(String, String)>,
     pub pending: Option<PendingOp>,
     pub view_url: Option<String>,
+    pub secret: Option<[u8; 32]>,
+    pub live_write: bool,
     pub should_quit: bool,
 }
 
@@ -104,6 +108,8 @@ impl App {
             discover: mock::mock_discover(),
             pending: None,
             view_url: None,
+            secret: None,
+            live_write: false,
             should_quit: false,
         }
     }
@@ -135,22 +141,48 @@ impl App {
             self.login_error = Some("cole seu nsec (qualquer valor vale no mock)".to_string());
             return;
         }
-        // Mock: aceita nsec / hex / bunker string; deriva npub fake para exibir.
-        let suffix: String = v
-            .chars()
-            .rev()
-            .take(8)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        self.npub = format!("npub1…{}", suffix);
+        // Fase 2: nsec/hex válido → escrita live; senão, modo leitura mock.
+        match nostr::parse_secret(&v) {
+            Ok(k) => {
+                let suffix: String = k
+                    .npub
+                    .chars()
+                    .rev()
+                    .take(8)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                self.npub = format!("{}…{}", &k.npub[..9], suffix);
+                self.secret = Some(k.secret);
+                self.live_write = true;
+                self.status = format!(
+                    "chave ok — escrita live habilitada via {}",
+                    self.relays
+                        .app_relays
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("?")
+                );
+            }
+            Err(_) => {
+                let suffix: String = v
+                    .chars()
+                    .rev()
+                    .take(8)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                self.npub = format!("npub1…{suffix} (leitura)");
+                self.secret = None;
+                self.live_write = false;
+                self.status =
+                    "modo leitura (sem chave válida) — escrita live desligada".to_string();
+            }
+        }
         self.authed = true;
         self.screen = Screen::Server;
-        self.status = format!(
-            "conectado como {} via {}",
-            self.npub, self.relays.app_relays[0]
-        );
         self.login_error = None;
     }
 
@@ -158,6 +190,9 @@ impl App {
         self.authed = false;
         self.screen = Screen::Welcome;
         self.login_input.clear();
+        self.secret = None;
+        self.live_write = false;
+        self.npub = "npub1…não logado".to_string();
         self.status = "desconectado".to_string();
     }
 
@@ -257,20 +292,128 @@ impl App {
                     .map(|x| x.content.clone())
                     .unwrap_or_default();
             }
-        } else if let Some(comm) = self.communities.get_mut(self.sel_community) {
+            self.input.clear();
+            self.input_mode = false;
+            self.status = "DM mock local (NIP-17/44 no roadmap)".to_string();
+            return;
+        }
+        // Fase 2: canal live + chave → publica no relay via pending.
+        let is_live = matches!(
+            (self.current_community(), self.current_channel()),
+            (Some(c), Some(ch)) if c.relay.is_some() && ch.live_group.is_some()
+        );
+        if is_live {
+            if self.secret.is_some() {
+                self.status = "enviando ao relay…".to_string();
+                self.pending = Some(PendingOp::Send);
+            } else {
+                self.status =
+                    "canal live exige login com nsec (você está em modo leitura)".to_string();
+                self.input_mode = false;
+            }
+            return;
+        }
+        if let Some(comm) = self.communities.get_mut(self.sel_community) {
             if let Some(ch) = comm.channels.get_mut(self.sel_channel) {
                 if ch.is_voice {
                     self.status = "canal de voz: terminal mostra presença; áudio só no app gráfico"
                         .to_string();
                 } else {
                     ch.messages.push(m);
+                    self.status = "mensagem mock local".to_string();
                 }
             }
             comm.unread = 0;
         }
         self.input.clear();
         self.input_mode = false;
-        self.status = "mensagem enviada (mock local — relay real no roadmap)".to_string();
+    }
+
+    fn live_target(&self) -> Option<(String, String)> {
+        match (self.current_community(), self.current_channel()) {
+            (Some(c), Some(ch)) => match (&c.relay, &ch.live_group) {
+                (Some(r), Some(g)) => Some((r.clone(), g.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn live_keys(&self) -> Option<nostr::Keys> {
+        let secret = self.secret?;
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&secret).ok()?;
+        let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
+        let (xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
+        // npub não é necessário aqui; reconstrói o mínimo para assinar.
+        Some(nostr::Keys {
+            secret,
+            pubkey_hex: format!("{xonly}"),
+            npub: String::new(),
+        })
+    }
+
+    /// Fase 2: publica o input como kind 9 no grupo live (com NIP-42 se pedido).
+    pub fn do_send(&mut self) {
+        let text = self.input.trim().to_string();
+        self.input.clear();
+        self.input_mode = false;
+        if text.is_empty() {
+            return;
+        }
+        let (relay, group) = match self.live_target() {
+            Some(t) => t,
+            None => {
+                self.status = "canal mock — nada a publicar".to_string();
+                return;
+            }
+        };
+        let keys = match self.live_keys() {
+            Some(k) => k,
+            None => {
+                self.status = "sem chave — faça login com nsec".to_string();
+                return;
+            }
+        };
+        match nostr::send_chat(&relay, &keys, &group, &text) {
+            Ok(id) => {
+                self.status = format!("publicado em {group} ({id})");
+                // Espelha localmente para feedback imediato.
+                if let Some(comm) = self.communities.get_mut(self.sel_community) {
+                    if let Some(ch) = comm.channels.get_mut(self.sel_channel) {
+                        ch.messages.push(Message {
+                            author: "você".to_string(),
+                            content: text,
+                            time: "agora".to_string(),
+                            mine: true,
+                        });
+                    }
+                }
+            }
+            Err(e) => self.status = format!("falha ao publicar: {e:#}"),
+        }
+    }
+
+    /// Fase 2: pedido de entrada kind 9021 no grupo live atual.
+    pub fn do_join(&mut self) {
+        let (relay, group) = match self.live_target() {
+            Some(t) => t,
+            None => {
+                self.status = "selecione um grupo live (r) antes do join".to_string();
+                return;
+            }
+        };
+        let keys = match self.live_keys() {
+            Some(k) => k,
+            None => {
+                self.status = "join exige login com nsec".to_string();
+                return;
+            }
+        };
+        match nostr::send_join(&relay, &keys, &group) {
+            Ok(id) => self.status = format!("join 9021 enviado p/ {group} ({id})"),
+            Err(e) => self.status = format!("falha no join: {e:#}"),
+        }
     }
 
     /// Fase 1: busca grupos públicos NIP-29 (kind 39000) no relay configurado.

@@ -16,3 +16,11 @@ clap = { version = "4", features = ["derive"] }
 tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 base64 = "0.22"
 ureq = "2"
+secp256k1 = { version = "0.29", features = ["global-context", "schnorr"] }
+bech32 = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+chacha20 = "0.9"
+getrandom = "0.2"

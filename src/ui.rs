@@ -79,7 +79,7 @@ fn render_welcome(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         )),
         Line::from("Comunidades E2EE serverless (Concord) + grupos NIP-29 via relays Nostr."),
         Line::from(""),
-        Line::from("Login mock (roadmap: nsec real + NIP-46 bunker):"),
+        Line::from("Login (fase 2: nsec1/hex habilita escrita; outro valor = só leitura):"),
         Line::from(format!("> {}", app.login_input)),
         Line::from(""),
         Line::from(match &app.login_error {
@@ -346,7 +346,8 @@ fn render_help(f: &mut Frame, _app: &mut App, area: ratatui::layout::Rect) {
         Line::from("q sair · 1-7 trocar tela · ? ajuda"),
         Line::from("Tab alterna foco (frota → canais → mensagens)"),
         Line::from("j/k ou ↑/↓ navegar · i digitar · Enter enviar · Esc cancelar"),
-        Line::from("r busca grupos NIP-29 live · m busca msgs do grupo · v vê imagem (kitty)"),
+        Line::from("r grupos live · m msgs do grupo · v imagem (kitty) · J join (9021)"),
+        Line::from("Enter em canal ⚡ com nsec publica de verdade (NIP-42 se pedido)"),
         Line::from("o logout (na tela Settings) · ⚡ = comunidade live"),
         Line::from(""),
         Line::from("Paridade com Electron (roadmap):"),
