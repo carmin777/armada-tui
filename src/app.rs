@@ -268,7 +268,7 @@ impl App {
 
     fn wipe_string(s: &mut String) {
         use zeroize::Zeroize;
-        s.as_bytes_mut().zeroize();
+        s.zeroize();
         s.clear();
         s.shrink_to_fit();
     }
@@ -728,7 +728,7 @@ impl App {
                 pk: format!("{xonly}"),
                 ch_id: id.clone(),
                 epoch: ep,
-                my_pk: self.live_keys().map(|k| k.pubkey_hex).unwrap_or_default(),
+                my_pk: self.live_keys().map(|k| k.pubkey_hex.clone()).unwrap_or_default(),
                 auth: self.secret,
             });
         }
