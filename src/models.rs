@@ -1,0 +1,70 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommunityKind {
+    /// Serverless E2EE (Concord / CORD) — gift-wrapped Nostr events.
+    Concord,
+    /// Relay-backed (NIP-29).
+    Nip29,
+}
+
+impl CommunityKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            CommunityKind::Concord => "concord",
+            CommunityKind::Nip29 => "nip-29",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+    pub topic: String,
+    pub is_voice: bool,
+    pub messages: Vec<Message>,
+    /// Grupo NIP-29 real quando `Some` (id do grupo); `None` = mock local.
+    pub live_group: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Community {
+    pub id: String,
+    pub name: String,
+    pub kind: CommunityKind,
+    pub channels: Vec<Channel>,
+    pub unread: usize,
+    /// Relay de origem quando buscado ao vivo (`r`); `None` = mock local.
+    pub relay: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub author: String,
+    pub content: String,
+    pub time: String,
+    pub mine: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DmThread {
+    pub peer: String,
+    pub preview: String,
+    pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectItem {
+    pub title: String,
+    pub status: String,
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelayConfig {
+    pub app_relays: Vec<String>,
+    pub search_relays: Vec<String>,
+    pub blossom_servers: Vec<String>,
+    pub voice_brokers: Vec<String>,
+}
