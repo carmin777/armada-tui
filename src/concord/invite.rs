@@ -228,6 +228,14 @@ pub fn fetch_bundle_event(relays: &[String], signer: &str) -> anyhow::Result<ser
                         "id": e.id, "pubkey": e.pubkey, "created_at": e.created_at,
                         "kind": e.kind, "tags": e.tags, "content": e.content, "sig": e.sig,
                     });
+                    // Valida ANTES de ordenar: bundle forjado com timestamp
+                    // maior não pode bloquear o válido.
+                    if crate::nostr::validate_value(&v).is_err() {
+                        continue;
+                    }
+                    if v.get("pubkey").and_then(|x| x.as_str()) != Some(signer) {
+                        continue;
+                    }
                     if best
                         .as_ref()
                         .map(|(t, _)| e.created_at > *t)
@@ -309,17 +317,18 @@ pub fn open_bundle(
             anyhow::bail!("bundle com canais demais");
         }
         for c in arr {
+            let id = c.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            let key = c.get("key").and_then(|x| x.as_str()).unwrap_or("");
+            // Estrito: id/key entram no estado só se forem hex32 válidos.
+            if hex::decode(id).map(|v| v.len()).unwrap_or(0) != 32 {
+                anyhow::bail!("bad-bundle: channel id inválido");
+            }
+            if hex::decode(key).map(|v| v.len()).unwrap_or(0) != 32 {
+                anyhow::bail!("bad-bundle: channel key inválida");
+            }
             channels.push(BundleChannel {
-                id: c
-                    .get("id")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                key: c
-                    .get("key")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                id: id.to_string(),
+                key: key.to_string(),
                 epoch: c.get("epoch").and_then(|x| x.as_u64()).unwrap_or(0),
                 name: c
                     .get("name")

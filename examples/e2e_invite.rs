@@ -47,7 +47,11 @@ fn main() -> anyhow::Result<()> {
                     let id: [u8; 32] = h32(&ch.id)?;
                     let g =
                         derive::group_key(derive::label::CHANNEL, &root, &id, Some(b.root_epoch));
-                    println!("lendo #{} (stream {}…)…", want, &g.pk[..8]);
+                    println!(
+                        "lendo #{} (stream {}…)…",
+                        want,
+                        armada_tui::models::short(&g.pk, 8).as_str()
+                    );
                     match inv::fetch_wraps(&b.relays, &g.pk, 50) {
                         Ok(wraps) => {
                             println!("wraps: {}", wraps.len());
@@ -63,7 +67,7 @@ fn main() -> anyhow::Result<()> {
                                             format!(
                                                 "[{t}] kind={} {}: {}",
                                                 r.kind,
-                                                &r.author[..8],
+                                                armada_tui::models::short(&r.author, 8).as_str(),
                                                 r.content
                                             ),
                                         ));
@@ -106,7 +110,12 @@ fn main() -> anyhow::Result<()> {
                         .unwrap_or_default();
                     msgs.push((
                         r.ms,
-                        format!("[{t}] kind={} {}: {}", r.kind, &r.author[..8], r.content),
+                        format!(
+                            "[{t}] kind={} {}: {}",
+                            r.kind,
+                            armada_tui::models::short(&r.author, 8).as_str(),
+                            r.content
+                        ),
                     ));
                 }
                 Err(e) => println!("(wrap ignorado: {e:#})"),

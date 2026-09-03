@@ -55,17 +55,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         if app.should_quit {
             break;
         }
-        // Operações de rede pendentes rodam após o draw (mostra "buscando…" antes).
-        if let Some(op) = app.pending.take() {
-            match op {
-                app::PendingOp::Groups => app.fetch_live_groups(),
-                app::PendingOp::Messages => app.fetch_live_messages(),
-                app::PendingOp::Send => app.do_send(),
-                app::PendingOp::Join => app.do_join(),
-                app::PendingOp::Invite => app.do_invite(),
-            }
-            continue;
-        }
+        // Operações de rede rodam em background; a UI nunca bloqueia.
+        app.start_pending();
+        app.poll_busy();
         // Viewer de imagem: sai do alt-screen, renderiza via kitty, volta.
         if let Some(url) = app.view_url.take() {
             suspend_and_view(app, terminal, &url);

@@ -1,14 +1,12 @@
-// Uso: NSEC=... COMMURL=... node finish.cjs — manda msg + acha invite na comunidade existente
+// Uso: NSEC=... COMMURL=... node finish.cjs (NSEC ausente = gera throwaway)
 const { chromium } = require('playwright-core');
-const NSEC = process.env.NSEC;
+const { launchOpts, ensureNsec } = require('./lib.cjs');
+const NSEC = ensureNsec();
 const COMMURL = process.env.COMMURL;
 const HELLO = `ola da tui e2e ${Date.now()}`;
 
 (async () => {
-  const browser = await chromium.launch({
-    executablePath: '/usr/bin/google-chrome-stable',
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--renderer-process-limit=1', '--disable-extensions', '--mute-audio'],
-  });
+  const browser = await chromium.launch(launchOpts());
   const page = await browser.newPage({ viewport: { width: 1000, height: 750 } });
   await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,webm}', (r) => r.abort()).catch(() => {});
   page.on('console', (m) => { if (m.type() === 'error') console.log('[browser.err]', m.text().slice(0, 140)); });

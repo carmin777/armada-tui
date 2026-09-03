@@ -129,6 +129,8 @@ pub(crate) fn open_stream_event(
     if str_field(wrap, "pubkey")? != stream_pk {
         anyhow::bail!("wrap não é da stream esperada");
     }
+    // O próprio wrap é assinado: valida antes de descriptografar.
+    verify_event(wrap)?;
     let conv = nip44::conversation_key(stream_sk, stream_pk)?;
     let seal_str = nip44::decrypt(&str_field(wrap, "content")?, &conv)?;
     let seal: serde_json::Value = serde_json::from_slice(&seal_str)?;

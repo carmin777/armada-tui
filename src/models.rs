@@ -17,6 +17,11 @@ impl CommunityKind {
     }
 }
 
+/// Prefixo seguro por caracteres (sem pânico em fronteira UTF-8).
+pub fn short(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: String,

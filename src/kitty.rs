@@ -21,17 +21,73 @@ pub fn supported() -> bool {
     )
 }
 
-/// Baixa URL e valida que é PNG (magic bytes). Limite 8 MiB.
+/// Hosts que `v` nunca busca (SSRF básico: tecla `v` abre URL de mensagem
+/// alheia — sem isso um rumor malicioso sondaria a rede local/nuvem).
+fn host_bloqueado(host: &str) -> bool {
+    let h = host.to_lowercase();
+    // Descasca porta e colchetes IPv6.
+    let h = h.rsplit(':').next().unwrap_or(&h);
+    let h = h.trim_matches(|c| c == '[' || c == ']');
+    if ["localhost", ""].contains(&h) {
+        return true;
+    }
+    for suf in [
+        ".local",
+        ".internal",
+        ".lan",
+        ".localhost",
+        ".invalid",
+        ".test",
+        ".example",
+    ] {
+        if h.ends_with(suf) {
+            return true;
+        }
+    }
+    // IPv4 privadas/link-local + metadata cloud.
+    let parts: Vec<&str> = h.split('.').collect();
+    if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
+        let n: Vec<u8> = parts.iter().map(|p| p.parse().unwrap()).collect();
+        if n[0] == 127 || n[0] == 10 || n[0] == 169 && n[1] == 254 {
+            return true;
+        }
+        if n[0] == 192 && n[1] == 168 {
+            return true;
+        }
+        if n[0] == 172 && (16..=31).contains(&n[1]) {
+            return true;
+        }
+    }
+    h == "::1"
+}
+
+fn check_url(url: &str) -> anyhow::Result<()> {
+    let lower = url.to_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        anyhow::bail!("só http(s)");
+    }
+    let after = url.split("://").nth(1).unwrap_or("");
+    let host = after.split('/').next().unwrap_or("");
+    if host_bloqueado(host) {
+        anyhow::bail!("host bloqueado p/ viewer ({host})");
+    }
+    Ok(())
+}
+
+/// Baixa URL e valida que é PNG (magic bytes). Teto real de 8 MiB: lê no
+/// máximo 8 MiB+1 (servidor malicioso não enche a RAM).
 pub fn fetch_png(url: &str) -> anyhow::Result<Vec<u8>> {
+    check_url(url)?;
+    const TETO: u64 = 8_000_001;
     let res = ureq::get(url).timeout(Duration::from_secs(15)).call()?;
     let ct = res.header("content-type").unwrap_or("").to_string();
     if !(ct.is_empty() || ct.contains("image/png") || ct.contains("octet-stream")) {
         anyhow::bail!("content-type não é PNG: {ct}");
     }
     let mut bytes = Vec::new();
-    res.into_reader().read_to_end(&mut bytes)?;
-    if bytes.len() > 8_000_000 {
-        anyhow::bail!("imagem > 8 MiB, recusada no MVP");
+    res.into_reader().take(TETO).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 >= TETO {
+        anyhow::bail!("imagem > 8 MiB, recusada");
     }
     if bytes.len() < 8 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
         anyhow::bail!("só PNG direto no MVP (f=100 do protocolo kitty)");
@@ -60,4 +116,40 @@ pub fn display_png(png: &[u8], cols: u32) -> anyhow::Result<()> {
     h.write_all(b"\n")?;
     h.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocklist_ssrf() {
+        for h in [
+            "localhost",
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.1",
+            "172.16.0.9",
+            "172.31.255.1",
+            "169.254.169.254",
+            "::1",
+            "x.local",
+            "y.internal",
+            "z.lan",
+        ] {
+            assert!(host_bloqueado(h), "{h} deveria bloquear");
+        }
+        for h in [
+            "relay.ditto.pub",
+            "blossom.primal.net",
+            "8.8.8.8",
+            "172.32.0.1",
+            "11.0.0.1",
+        ] {
+            assert!(!host_bloqueado(h), "{h} não deveria bloquear");
+        }
+        assert!(check_url("https://blossom.primal.net/x.png").is_ok());
+        assert!(check_url("http://169.254.169.254/meta").is_err());
+        assert!(check_url("file:///etc/passwd").is_err());
+    }
 }

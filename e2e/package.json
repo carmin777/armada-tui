@@ -1,14 +1,14 @@
 {
   "name": "e2e",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "E2E manual contra armada.buzz (fora do CI): NSEC=nsec1... node finish.cjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --check lib.cjs && node --check finish.cjs && node --check full.cjs && node --check login.cjs && node --check mkserver.cjs && node --check msg.cjs && node --check probe1.cjs && node --check probe2.cjs && echo e2e-scripts-ok"
   },
   "keywords": [],
   "type": "commonjs",
   "dependencies": {
+    "nostr-tools": "^2.25.1",
     "playwright-core": "^1.62.1"
   }
 }

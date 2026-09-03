@@ -52,8 +52,7 @@ pub enum Focus {
     Messages,
 }
 
-/// Operação de rede pendente: executa após o próximo draw (p/ mostrar
-/// "buscando…" antes do bloqueio de ~15s no MVP single-thread).
+/// Pedido de rede: vira worker em background (UI nunca bloqueia).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingOp {
     Groups,
@@ -61,6 +60,48 @@ pub enum PendingOp {
     Send,
     Join,
     Invite,
+}
+
+/// Resultado que o worker devolve para a thread da UI aplicar.
+pub enum OpResult {
+    Groups(Vec<Community>),
+    Chat {
+        ci: usize,
+        chi: usize,
+        messages: Vec<Message>,
+    },
+    Sent {
+        ci: usize,
+        chi: usize,
+        text: String,
+        id: String,
+    },
+    Joined(String),
+    Invited(Community),
+    Failed(String),
+}
+
+/// Operação em voo: a UI desenha spinner e continua respondendo.
+pub struct BusyOp {
+    pub label: String,
+    pub rx: std::sync::mpsc::Receiver<OpResult>,
+}
+
+/// Alvo de leitura de mensagens (snapshot p/ worker).
+#[derive(Clone)]
+pub enum MsgTarget {
+    Nip29 {
+        relay: String,
+        group: String,
+    },
+    Concord {
+        relays: Vec<String>,
+        sk: [u8; 32],
+        pk: String,
+        ch_id: String,
+        epoch: u64,
+        my_pk: String,
+    },
 }
 
 pub struct App {
@@ -83,6 +124,7 @@ pub struct App {
     pub projects: Vec<ProjectItem>,
     pub discover: Vec<(String, String)>,
     pub pending: Option<PendingOp>,
+    pub busy: Option<BusyOp>,
     pub view_url: Option<String>,
     pub secret: Option<[u8; 32]>,
     pub live_write: bool,
@@ -113,6 +155,7 @@ impl App {
             projects: mock::mock_projects(),
             discover: mock::mock_discover(),
             pending: None,
+            busy: None,
             view_url: None,
             secret: None,
             live_write: false,
@@ -192,13 +235,19 @@ impl App {
         self.authed = true;
         self.screen = Screen::Server;
         self.login_error = None;
+        // P1-4: o segredo digitado sai da memória imediatamente.
+        self.login_input.clear();
     }
 
     pub fn logout(&mut self) {
         self.authed = false;
         self.screen = Screen::Welcome;
         self.login_input.clear();
-        self.secret = None;
+        // P1-4: zeroíza a chave ao sair (não só dropa).
+        if let Some(mut s) = self.secret.take() {
+            use zeroize::Zeroize;
+            s.zeroize();
+        }
         self.live_write = false;
         self.npub = "npub1…não logado".to_string();
         self.status = "desconectado".to_string();
@@ -361,34 +410,123 @@ impl App {
         })
     }
 
-    /// Fase 2: publica o input como kind 9 no grupo live (com NIP-42 se pedido).
-    pub fn do_send(&mut self) {
-        let text = self.input.trim().to_string();
-        self.input.clear();
-        self.input_mode = false;
-        if text.is_empty() {
+    /// Dispara o pending em background: a UI segue respondendo (spinner).
+    pub fn start_pending(&mut self) {
+        let op = match self.pending.take() {
+            Some(o) => o,
+            None => return,
+        };
+        if self.busy.is_some() {
+            self.pending = Some(op);
+            self.status = "aguarde a operação atual…".to_string();
             return;
         }
-        let (relay, group) = match self.live_target() {
-            Some(t) => t,
-            None => {
-                self.status = "canal mock — nada a publicar".to_string();
-                return;
+        let (label, worker): (String, Box<dyn FnOnce() -> OpResult + Send>) = match op {
+            PendingOp::Groups => {
+                let relay = self.relays.app_relays.first().cloned().unwrap_or_default();
+                (
+                    format!("grupos em {relay}"),
+                    Box::new(move || Self::op_fetch_groups(relay)),
+                )
+            }
+            PendingOp::Messages => match self.snapshot_msg_target() {
+                Some(t) => {
+                    let (ci, chi) = (self.sel_community, self.sel_channel);
+                    (
+                        "msgs…".to_string(),
+                        Box::new(move || Self::op_fetch_messages(t, ci, chi)),
+                    )
+                }
+                None => {
+                    self.status = "nada live selecionado (r/I antes)".to_string();
+                    return;
+                }
+            },
+            PendingOp::Send => match (self.live_target(), self.live_keys()) {
+                (Some((relay, group)), Some(keys)) => {
+                    let text = self.input.trim().to_string();
+                    let (ci, chi) = (self.sel_community, self.sel_channel);
+                    self.input_mode = false;
+                    (
+                        "enviando…".to_string(),
+                        Box::new(move || Self::op_send(relay, group, keys, text, ci, chi)),
+                    )
+                }
+                _ => {
+                    self.status = "sem chave ou sem grupo live".to_string();
+                    return;
+                }
+            },
+            PendingOp::Join => match (self.live_target(), self.live_keys()) {
+                (Some((relay, group)), Some(keys)) => (
+                    "join 9021…".to_string(),
+                    Box::new(move || Self::op_join(relay, group, keys)),
+                ),
+                _ => {
+                    self.status = "join exige grupo live + nsec".to_string();
+                    return;
+                }
+            },
+            PendingOp::Invite => {
+                let link = self.invite_input.trim().to_string();
+                self.invite_input.clear();
+                self.invite_mode = false;
+                if link.is_empty() {
+                    return;
+                }
+                (
+                    "invite…".to_string(),
+                    Box::new(move || Self::op_invite(link)),
+                )
             }
         };
-        let keys = match self.live_keys() {
-            Some(k) => k,
-            None => {
-                self.status = "sem chave — faça login com nsec".to_string();
-                return;
-            }
+        self.status = format!("ocupado: {label}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let out = worker();
+            let _ = tx.send(out);
+        });
+        self.busy = Some(BusyOp { label, rx });
+    }
+
+    /// Colhe resultado do worker (não bloqueia) e aplica no estado.
+    pub fn poll_busy(&mut self) {
+        let done = match &self.busy {
+            Some(b) => match b.rx.try_recv() {
+                Ok(out) => Some(out),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(_) => Some(OpResult::Failed("worker morreu".to_string())),
+            },
+            None => return,
         };
-        match nostr::send_chat(&relay, &keys, &group, &text) {
-            Ok(id) => {
-                self.status = format!("publicado em {group} ({id})");
-                // Espelha localmente para feedback imediato.
-                if let Some(comm) = self.communities.get_mut(self.sel_community) {
-                    if let Some(ch) = comm.channels.get_mut(self.sel_channel) {
+        let out = match done {
+            Some(o) => o,
+            None => return,
+        };
+        self.busy = None;
+        match out {
+            OpResult::Groups(list) => {
+                self.communities
+                    .retain(|c| c.relay.is_none() || c.kind == CommunityKind::Concord);
+                let n = list.len();
+                self.communities.extend(list);
+                self.status = format!("{n} grupos live (m = msgs, v = imagem)");
+            }
+            OpResult::Chat { ci, chi, messages } => {
+                let n = messages.len();
+                if let Some(comm) = self.communities.get_mut(ci) {
+                    if let Some(ch) = comm.channels.get_mut(chi) {
+                        ch.messages = messages;
+                    }
+                }
+                self.msg_scroll = 0;
+                self.status = format!("{n} msgs");
+            }
+            OpResult::Sent { ci, chi, text, id } => {
+                self.input.clear();
+                self.input_mode = false;
+                if let Some(comm) = self.communities.get_mut(ci) {
+                    if let Some(ch) = comm.channels.get_mut(chi) {
                         ch.messages.push(Message {
                             author: "você".to_string(),
                             content: text,
@@ -397,49 +535,66 @@ impl App {
                         });
                     }
                 }
+                self.status = format!("publicado ({id})");
             }
-            Err(e) => self.status = format!("falha ao publicar: {e:#}"),
+            OpResult::Joined(id) => self.status = format!("join 9021 enviado ({id})"),
+            OpResult::Invited(comm) => {
+                let n = comm.channels.len();
+                let name = comm.name.clone();
+                self.communities.push(comm);
+                self.sel_community = self.communities.len() - 1;
+                self.sel_channel = 0;
+                self.status = format!("frota '{name}' com {n} canais (m = descriptografar)");
+            }
+            OpResult::Failed(e) => {
+                // P2-7: rascunho preservado — texto volta pro input p/ retry.
+                if !self.input.trim().is_empty() {
+                    self.input_mode = true;
+                }
+                self.status = format!("falha: {e}");
+            }
         }
     }
 
-    /// Fase 2: pedido de entrada kind 9021 no grupo live atual.
-    pub fn do_join(&mut self) {
-        let (relay, group) = match self.live_target() {
-            Some(t) => t,
-            None => {
-                self.status = "selecione um grupo live (r) antes do join".to_string();
-                return;
-            }
-        };
-        let keys = match self.live_keys() {
-            Some(k) => k,
-            None => {
-                self.status = "join exige login com nsec".to_string();
-                return;
-            }
-        };
-        match nostr::send_join(&relay, &keys, &group) {
-            Ok(id) => self.status = format!("join 9021 enviado p/ {group} ({id})"),
-            Err(e) => self.status = format!("falha no join: {e:#}"),
+    /// Snapshot do alvo de leitura p/ worker (NIP-29 ou Concord).
+    fn snapshot_msg_target(&self) -> Option<MsgTarget> {
+        let (c, ch) = (self.current_community()?, self.current_channel()?);
+        if let (Some(sk), Some(id), Some(ep)) = (&ch.stream_sk, &ch.stream_id, ch.stream_epoch) {
+            let sk: [u8; 32] = hex::decode(sk).ok()?.try_into().ok()?;
+            let secp = secp256k1::Secp256k1::new();
+            let kp = secp256k1::Keypair::from_secret_key(
+                &secp,
+                &secp256k1::SecretKey::from_slice(&sk).ok()?,
+            );
+            let (xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
+            return Some(MsgTarget::Concord {
+                relays: c.relays.clone(),
+                sk,
+                pk: format!("{xonly}"),
+                ch_id: id.clone(),
+                epoch: ep,
+                my_pk: self.live_keys().map(|k| k.pubkey_hex).unwrap_or_default(),
+            });
+        }
+        match (&c.relay, &ch.live_group) {
+            (Some(r), Some(g)) => Some(MsgTarget::Nip29 {
+                relay: r.clone(),
+                group: g.clone(),
+            }),
+            _ => None,
         }
     }
 
-    /// Fase 1: busca grupos públicos NIP-29 (kind 39000) no relay configurado.
-    /// Mantém as comunidades mock (Concord) e troca as live anteriores.
-    pub fn fetch_live_groups(&mut self) {
-        let relay = self.relays.app_relays.first().cloned().unwrap_or_default();
+    /// Grupos NIP-29 (kind 39000) → comunidades prontas (roda no worker).
+    fn op_fetch_groups(relay: String) -> OpResult {
         if relay.is_empty() {
-            self.status = "sem relay configurado".to_string();
-            return;
+            return OpResult::Failed("sem relay configurado".to_string());
         }
-        self.status = format!("buscando grupos NIP-29 em {relay}…");
         match nostr::fetch_groups(&relay) {
             Ok(groups) => {
-                self.communities
-                    .retain(|c| c.relay.is_none() || c.kind == CommunityKind::Concord);
-                let n = groups.len();
-                for g in groups {
-                    self.communities.push(Community {
+                let list = groups
+                    .into_iter()
+                    .map(|g| Community {
                         id: format!("live-{}", g.id),
                         name: g.name.clone(),
                         kind: CommunityKind::Nip29,
@@ -461,58 +616,101 @@ impl App {
                             stream_id: None,
                             stream_epoch: None,
                         }],
-                    });
-                }
-                self.status = format!("{n} grupos live de {relay} (m = msgs, v = imagem)");
+                    })
+                    .collect();
+                OpResult::Groups(list)
             }
-            Err(e) => {
-                self.status = format!("falha NIP-29: {e:#}");
+            Err(e) => OpResult::Failed(format!("falha NIP-29: {e:#}")),
+        }
+    }
+
+    /// Lê mensagens no worker (NIP-29 ou Concord E2EE).
+    fn op_fetch_messages(t: MsgTarget, ci: usize, chi: usize) -> OpResult {
+        match t {
+            MsgTarget::Nip29 { relay, group } => match nostr::fetch_messages(&relay, &group, 50) {
+                Ok(msgs) => OpResult::Chat {
+                    ci,
+                    chi,
+                    messages: msgs
+                        .into_iter()
+                        .map(|m| Message {
+                            author: m.author,
+                            content: m.content,
+                            time: m.time,
+                            mine: false,
+                        })
+                        .collect(),
+                },
+                Err(e) => OpResult::Failed(format!("falha msgs: {e:#}")),
+            },
+            MsgTarget::Concord {
+                relays,
+                sk,
+                pk,
+                ch_id,
+                epoch,
+                my_pk,
+            } => {
+                use crate::concord::{invite as inv, stream};
+                let wraps = match inv::fetch_wraps(&relays, &pk, 50) {
+                    Ok(w) => w,
+                    Err(e) => return OpResult::Failed(format!("wraps: {e:#}")),
+                };
+                let mut msgs: Vec<(i64, Message)> = Vec::new();
+                let mut fails = 0usize;
+                for w in &wraps {
+                    match stream::open_wrap(w, &sk, &pk, &ch_id, epoch) {
+                        Ok(r) if r.kind == 9 => msgs.push((
+                            r.ms,
+                            Message {
+                                author: if r.author == my_pk {
+                                    "você".to_string()
+                                } else {
+                                    crate::models::short(&r.author, 8)
+                                },
+                                content: r.content,
+                                time: chrono::DateTime::from_timestamp_millis(r.ms)
+                                    .map(|d| d.format("%d/%m %H:%M").to_string())
+                                    .unwrap_or_else(|| "?".to_string()),
+                                mine: r.author == my_pk,
+                            },
+                        )),
+                        Ok(_) => {}
+                        Err(_) => fails += 1,
+                    }
+                }
+                msgs.sort_by_key(|(ms, _)| *ms);
+                let n = msgs.len();
+                let _ = fails;
+                OpResult::Chat {
+                    ci,
+                    chi,
+                    messages: msgs.into_iter().map(|(_, m)| m).collect(),
+                }
             }
         }
     }
 
-    /// Fase 1: busca mensagens do grupo live atual (kinds 1/9/11 + tag h).
-    /// Se o canal for Concord com chave, descriptografa os wraps em vez disso.
-    pub fn fetch_live_messages(&mut self) {
-        if matches!(self.current_channel(), Some(ch) if ch.stream_sk.is_some()) {
-            self.do_concord_messages();
-            return;
+    /// Publica kind 9 no worker (NIP-42 com reenvio dentro do publish).
+    fn op_send(
+        relay: String,
+        group: String,
+        keys: nostr::Keys,
+        text: String,
+        ci: usize,
+        chi: usize,
+    ) -> OpResult {
+        match nostr::send_chat(&relay, &keys, &group, &text) {
+            Ok(id) => OpResult::Sent { ci, chi, text, id },
+            Err(e) => OpResult::Failed(format!("falha ao publicar: {e:#}")),
         }
-        let (relay, group) = match (self.current_community(), self.current_channel()) {
-            (Some(c), Some(ch)) => match (&c.relay, &ch.live_group) {
-                (Some(r), Some(g)) => (r.clone(), g.clone()),
-                _ => {
-                    self.status = "canal mock — use r p/ trazer grupos live antes".to_string();
-                    return;
-                }
-            },
-            _ => {
-                self.status = "nada selecionado".to_string();
-                return;
-            }
-        };
-        self.status = format!("buscando msgs de {group}…");
-        match nostr::fetch_messages(&relay, &group, 50) {
-            Ok(msgs) => {
-                let n = msgs.len();
-                if let Some(comm) = self.communities.get_mut(self.sel_community) {
-                    if let Some(ch) = comm.channels.get_mut(self.sel_channel) {
-                        ch.messages = msgs
-                            .into_iter()
-                            .map(|m| Message {
-                                author: m.author,
-                                content: m.content,
-                                time: m.time,
-                                mine: false,
-                            })
-                            .collect();
-                    }
-                }
-                self.status = format!("{n} msgs live de {group}");
-            }
-            Err(e) => {
-                self.status = format!("falha msgs: {e:#}");
-            }
+    }
+
+    /// Join 9021 no worker.
+    fn op_join(relay: String, group: String, keys: nostr::Keys) -> OpResult {
+        match nostr::send_join(&relay, &keys, &group) {
+            Ok(id) => OpResult::Joined(id),
+            Err(e) => OpResult::Failed(format!("falha no join: {e:#}")),
         }
     }
 
@@ -568,37 +766,25 @@ impl App {
         }
     }
 
-    /// Invite Concord: parse link → bundle → comunidade com chaves.
-    pub fn do_invite(&mut self) {
+    /// Invite Concord no worker: parse → bundle → control → comunidade pronta.
+    fn op_invite(link: String) -> OpResult {
         use crate::concord::invite as inv;
-        let link = self.invite_input.trim().to_string();
-        self.invite_input.clear();
-        self.invite_mode = false;
-        if link.is_empty() {
-            return;
-        }
         let p = match inv::parse_invite_link(&link) {
             Some(p) => p,
             None => {
-                self.status = "link não parece invite Concord (…/invite/<naddr>#…)".to_string();
-                return;
+                return OpResult::Failed(
+                    "link não parece invite Concord (…/invite/<naddr>#…)".to_string(),
+                )
             }
         };
-        self.status = format!("buscando bundle em {} relays…", p.relays.len());
         let ev = match inv::fetch_bundle_event(&p.relays, &p.link_signer) {
             Ok(ev) => ev,
-            Err(e) => {
-                self.status = format!("bundle não achado: {e:#}");
-                return;
-            }
+            Err(e) => return OpResult::Failed(format!("bundle não achado: {e:#}")),
         };
         let now_ms = chrono::Utc::now().timestamp_millis();
         let b = match inv::open_bundle(&ev, &p.link_signer, &p.token, now_ms) {
             Ok(b) => b,
-            Err(e) => {
-                self.status = format!("convite inválido: {e:#}");
-                return;
-            }
+            Err(e) => return OpResult::Failed(format!("convite inválido: {e:#}")),
         };
         let primary = b.relays.first().cloned().unwrap_or_default();
         // Control plane: descobre canais (públicos derivam do root).
@@ -665,7 +851,7 @@ impl App {
                 channels.push(Channel {
                     id: gc.id.clone(),
                     name: if gc.name.is_empty() {
-                        format!("#{}", &gc.id[..8.min(gc.id.len())])
+                        format!("#{}", crate::models::short(&gc.id, 8))
                     } else {
                         gc.name.clone()
                     },
@@ -679,8 +865,7 @@ impl App {
                 });
             }
         }
-        let n = channels.len();
-        self.communities.push(Community {
+        OpResult::Invited(Community {
             id: format!("concord-{}", b.community_id),
             name: b.name.clone(),
             kind: CommunityKind::Concord,
@@ -692,89 +877,6 @@ impl App {
             },
             relays: b.relays.clone(),
             channels,
-        });
-        self.sel_community = self.communities.len() - 1;
-        self.sel_channel = 0;
-        self.status = format!("frota '{}' com {n} canais (m = descriptografar)", b.name);
-    }
-
-    /// Lê o chat E2EE do canal Concord atual (wraps → open → kind 9).
-    pub fn do_concord_messages(&mut self) {
-        use crate::concord::{invite as inv, stream};
-        let (relays, sk_hex, ch_id, epoch) =
-            match (self.current_community(), self.current_channel()) {
-                (Some(c), Some(ch)) => match (&ch.stream_sk, &ch.stream_id, ch.stream_epoch) {
-                    (Some(sk), Some(id), Some(ep)) => {
-                        (c.relays.clone(), sk.clone(), id.clone(), ep)
-                    }
-                    _ => {
-                        self.status = "canal sem chave Concord (entre com invite: I)".to_string();
-                        return;
-                    }
-                },
-                _ => {
-                    self.status = "nada selecionado".to_string();
-                    return;
-                }
-            };
-        let sk: [u8; 32] = match hex::decode(&sk_hex).ok().and_then(|b| b.try_into().ok()) {
-            Some(b) => b,
-            None => {
-                self.status = "chave do canal inválida".to_string();
-                return;
-            }
-        };
-        let secp = secp256k1::Secp256k1::new();
-        let kp = match secp256k1::SecretKey::from_slice(&sk)
-            .map(|s| secp256k1::Keypair::from_secret_key(&secp, &s))
-        {
-            Ok(k) => k,
-            Err(_) => {
-                self.status = "chave do canal inválida".to_string();
-                return;
-            }
-        };
-        let (xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
-        let stream_pk = format!("{xonly}");
-        self.status = format!("buscando wraps em {} relays…", relays.len());
-        let wraps = match inv::fetch_wraps(&relays, &stream_pk, 50) {
-            Ok(w) => w,
-            Err(e) => {
-                self.status = format!("wraps: {e:#}");
-                return;
-            }
-        };
-        let my_pk = self.live_keys().map(|k| k.pubkey_hex).unwrap_or_default();
-        let mut msgs: Vec<(i64, Message)> = Vec::new();
-        let mut fails = 0usize;
-        for w in &wraps {
-            match stream::open_wrap(w, &sk, &stream_pk, &ch_id, epoch) {
-                Ok(r) if r.kind == 9 => msgs.push((
-                    r.ms,
-                    Message {
-                        author: if r.author == my_pk {
-                            "você".to_string()
-                        } else {
-                            r.author[..8.min(r.author.len())].to_string()
-                        },
-                        content: r.content,
-                        time: chrono::DateTime::from_timestamp_millis(r.ms)
-                            .map(|d| d.format("%d/%m %H:%M").to_string())
-                            .unwrap_or_else(|| "?".to_string()),
-                        mine: r.author == my_pk,
-                    },
-                )),
-                Ok(_) => {}
-                Err(_) => fails += 1,
-            }
-        }
-        msgs.sort_by_key(|(ms, _)| *ms);
-        let n = msgs.len();
-        if let Some(comm) = self.communities.get_mut(self.sel_community) {
-            if let Some(ch) = comm.channels.get_mut(self.sel_channel) {
-                ch.messages = msgs.into_iter().map(|(_, m)| m).collect();
-            }
-        }
-        self.status = format!("{n} msgs E2EE ({fails} wraps ignorados)");
+        })
     }
 }

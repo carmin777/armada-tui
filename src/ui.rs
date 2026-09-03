@@ -56,10 +56,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Screen::Help => render_help(f, app, chunks[1]),
     }
 
+    let work = match &app.busy {
+        Some(b) => format!(" ⏳ {}", b.label),
+        None => String::new(),
+    };
     let status = format!(
-        " {} | {} | {} | q sair · 1-8 telas · r grupos · m msgs · v imagem · ? ajuda ",
+        " {} | {}{} | {} | q sair · 1-8 telas · r grupos · m msgs · v imagem · ? ajuda ",
         app.npub,
         app.status,
+        work,
         voice_note()
     );
     let bar = Paragraph::new(status)
@@ -84,7 +89,7 @@ fn render_welcome(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         Line::from("Comunidades E2EE serverless (Concord) + grupos NIP-29 via relays Nostr."),
         Line::from(""),
         Line::from("Login (nsec1/hex = escrita · g com campo vazio = conta de brincadeira):"),
-        Line::from(format!("> {}", app.login_input)),
+        Line::from(format!("> {}", "•".repeat(app.login_input.chars().count()))),
         Line::from(""),
         Line::from(match &app.login_error {
             Some(e) => format!("(!) {e}"),

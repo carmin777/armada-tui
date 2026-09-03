@@ -2,7 +2,7 @@
 //!
 //! Sem dependência de SDK pesado: `tungstenite` sync + thread com timeout.
 //! - Grupos:  `["REQ", sub, {"kinds":[39000]}]` → metadados (d/name/about/picture)
-//! - Mensagens: `["REQ", sub, {"kinds":[1,9,11], "#h":[group-id], "limit":N}]`
+//! - Mensagens: `["REQ", sub, {"kinds":[1,7,9,11,1111], "#h":[group-id], "limit":N}]`
 //! Grupos privados (NIP-42 auth) e escrita/E2EE ficam p/ fases seguintes.
 
 use serde::Deserialize;
@@ -58,8 +58,8 @@ fn fmt_time(ts: i64) -> String {
 }
 
 /// REQ genérico: conecta, manda filtro, coleta EVENTs até EOSE ou deadline.
-/// Roda numa thread filha; a principal espera com `timeout` (thread órfã
-/// bloqueada em read é abandonada — aceitável no MVP).
+/// Roda numa thread filha; o socket tem read-timeout então a thread morre
+/// sozinha se o relay travar (sem órfãs eternas).
 pub(crate) fn req_events(
     relay_url: &str,
     sub_id: &str,
@@ -74,6 +74,7 @@ pub(crate) fn req_events(
     std::thread::spawn(move || {
         let out = (|| -> anyhow::Result<Vec<NostrEvent>> {
             let (mut socket, _) = tungstenite::connect(url)?;
+            arm_timeouts(&mut socket);
             socket.send(tungstenite::Message::Text(req))?;
             let mut events = Vec::new();
             let deadline = Instant::now() + Duration::from_secs(25);
@@ -89,7 +90,10 @@ pub(crate) fn req_events(
                                 if let Some(ev) = v.get(2) {
                                     if let Ok(e) = serde_json::from_value::<NostrEvent>(ev.clone())
                                     {
-                                        events.push(e);
+                                        // Relay malicioso não forja: valida antes de aceitar.
+                                        if validate_nostr_event(&e).is_ok() {
+                                            events.push(e);
+                                        }
                                     }
                                 }
                             }
@@ -114,6 +118,96 @@ pub(crate) fn req_events(
     }
 }
 
+type Ws = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
+
+/// Read-timeout no TCP interno (Plain ou Rustls) para threads não pendurarem.
+fn arm_timeouts(socket: &mut Ws) {
+    let d = Some(Duration::from_secs(30));
+    #[allow(unreachable_patterns)]
+    match socket.get_mut() {
+        tungstenite::stream::MaybeTlsStream::Plain(s) => {
+            let _ = s.set_read_timeout(d);
+        }
+        tungstenite::stream::MaybeTlsStream::Rustls(s) => {
+            let _ = s.get_mut().set_read_timeout(d);
+        }
+        _ => {}
+    }
+}
+
+/// Validação NIP-01 central: id canônico + schnorr. Tudo que entra pela rede
+/// passa aqui ANTES de ordenar/deduplicar/exibir.
+pub(crate) fn validate_fields(
+    pubkey: &str,
+    created_at: i64,
+    kind: u64,
+    tags: &Vec<Vec<String>>,
+    content: &str,
+    id: &str,
+    sig: &str,
+) -> anyhow::Result<()> {
+    use sha2::Digest;
+    let commit = serde_json::json!([0, pubkey, created_at, kind, tags, content]);
+    let digest = sha2::Sha256::digest(serde_json::to_string(&commit)?.as_bytes());
+    if hex::encode(digest) != id.to_lowercase() {
+        anyhow::bail!("id não confere");
+    }
+    let secp = secp256k1::Secp256k1::new();
+    let s = secp256k1::schnorr::Signature::from_slice(&hex::decode(sig)?)?;
+    let m = secp256k1::Message::from_digest(digest.into());
+    let x = secp256k1::XOnlyPublicKey::from_slice(&hex::decode(pubkey)?)?;
+    secp.verify_schnorr(&s, &m, &x)?;
+    Ok(())
+}
+
+pub(crate) fn validate_nostr_event(e: &NostrEvent) -> anyhow::Result<()> {
+    validate_fields(
+        &e.pubkey,
+        e.created_at,
+        e.kind,
+        &e.tags,
+        &e.content,
+        &e.id,
+        &e.sig,
+    )
+}
+
+/// Valida evento em JSON (bundle, wraps, o que vier de fora).
+pub(crate) fn validate_value(ev: &serde_json::Value) -> anyhow::Result<()> {
+    let s = |f: &str| {
+        ev.get(f)
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| anyhow::anyhow!("sem campo {f}"))
+    };
+    let tags: Vec<Vec<String>> = ev
+        .get("tags")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|t| {
+                    t.as_array()
+                        .map(|inner| {
+                            inner
+                                .iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .ok_or_else(|| anyhow::anyhow!("sem tags"))?;
+    validate_fields(
+        s("pubkey")?,
+        ev.get("created_at").and_then(|x| x.as_i64()).unwrap_or(-1),
+        ev.get("kind").and_then(|x| x.as_u64()).unwrap_or(u64::MAX),
+        &tags,
+        s("content")?,
+        s("id")?,
+        s("sig")?,
+    )
+}
+
 /// Lista grupos públicos (kind 39000) do relay.
 pub fn fetch_groups(relay_url: &str) -> anyhow::Result<Vec<Nip29Group>> {
     let filter = serde_json::json!({"kinds": [39000]});
@@ -133,9 +227,10 @@ pub fn fetch_groups(relay_url: &str) -> anyhow::Result<Vec<Nip29Group>> {
         .collect())
 }
 
-/// Últimas mensagens com tag `h = group_id` (kinds 1/9/11), ordenadas.
+/// Últimas mensagens com tag `h = group_id` (kinds 1/7/9/11/1111), ordenadas.
 pub fn fetch_messages(relay_url: &str, group_id: &str, limit: u32) -> anyhow::Result<Vec<ChatMsg>> {
-    let filter = serde_json::json!({"kinds": [1, 9, 11], "#h": [group_id], "limit": limit});
+    let filter =
+        serde_json::json!({"kinds": [1, 7, 9, 11, 1111], "#h": [group_id], "limit": limit});
     let mut evs = req_events(relay_url, "armada-msgs", filter, Duration::from_secs(15))?;
     evs.sort_by_key(|e| e.created_at);
     Ok(evs
@@ -278,11 +373,18 @@ pub fn publish(
     std::thread::spawn(move || {
         let out = (|| -> anyhow::Result<String> {
             let (mut socket, _) = tungstenite::connect(url.clone())?;
-            let send_auth = |socket: &mut tungstenite::WebSocket<
-                tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
-            >,
-                             challenge: &str|
-             -> anyhow::Result<()> {
+            arm_timeouts(&mut socket);
+            let send_event = |socket: &mut Ws| -> anyhow::Result<()> {
+                socket.send(tungstenite::Message::Text(
+                    serde_json::json!([
+                        "EVENT",
+                        serde_json::from_str::<serde_json::Value>(&evt_s)?
+                    ])
+                    .to_string(),
+                ))?;
+                Ok(())
+            };
+            let send_auth = |socket: &mut Ws, challenge: &str| -> anyhow::Result<()> {
                 let k = keys.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("relay pediu NIP-42 mas não há chave (faça login com nsec)")
                 })?;
@@ -300,10 +402,7 @@ pub fn publish(
                 ))?;
                 Ok(())
             };
-            socket.send(tungstenite::Message::Text(
-                serde_json::json!(["EVENT", serde_json::from_str::<serde_json::Value>(&evt_s)?])
-                    .to_string(),
-            ))?;
+            send_event(&mut socket)?;
             let deadline = Instant::now() + Duration::from_secs(25);
             loop {
                 if Instant::now() > deadline {
@@ -316,6 +415,8 @@ pub fn publish(
                             Some("AUTH") => {
                                 let ch = v.get(1).and_then(|x| x.as_str()).unwrap_or("");
                                 send_auth(&mut socket, ch)?;
+                                // NIP-42: depois de autenticar, reenvia o EVENT.
+                                send_event(&mut socket)?;
                             }
                             Some("OK") => {
                                 if v.get(1).and_then(|x| x.as_str()) == Some(id.as_str()) {
