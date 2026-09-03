@@ -11,7 +11,7 @@
     {"id": "concord.invite", "area": "concord", "status": "done", "evidence": "live", "electron": "abrir invite …/invite/naddr#frag", "tui": "tecla I: bundle 33301 real aberto e validado"},
     {"id": "concord.control", "area": "concord", "status": "done", "evidence": "live", "electron": "fold do control plane (canais)", "tui": "13 canais reais dobrados da Soapbox Community"},
     {"id": "concord.chat.read", "area": "concord", "status": "done", "evidence": "live", "electron": "ler chat E2EE dos canais", "tui": "tecla m: #general real descriptografado"},
-    {"id": "concord.chat.write", "area": "concord", "status": "partial", "evidence": "unit", "electron": "enviar msg selada (seal+wrap)", "tui": "Enter sela+publica (roundtrip testado, sem teste live)"},
+    {"id": "concord.chat.write", "area": "concord", "status": "done", "evidence": "live", "electron": "enviar msg selada (seal+wrap)", "tui": "oi postado no #general real e exibido no Electron"},
     {"id": "concord.rekey", "area": "concord", "status": "missing", "evidence": "none", "electron": "rotação de chaves CORD-06", "tui": "—"},
     {"id": "concord.grant", "area": "concord", "status": "partial", "evidence": "fixture", "electron": "canais privados via grant do bundle", "tui": "merge codificado+fixture, sem grant real testado"},
     {"id": "dm.list", "area": "DMs", "status": "partial", "evidence": "none", "electron": "lista conversas E2EE", "tui": "mock local, tela existe"},
