@@ -598,7 +598,85 @@ impl App {
             }
         };
         let primary = b.relays.first().cloned().unwrap_or_default();
-        let n = b.channels.len();
+        // Control plane: descobre canais (públicos derivam do root).
+        use crate::concord::{control, derive};
+        let root: Option<[u8; 32]> = hex::decode(&b.community_root)
+            .ok()
+            .and_then(|v| v.try_into().ok());
+        let cid: Option<[u8; 32]> = hex::decode(&b.community_id)
+            .ok()
+            .and_then(|v| v.try_into().ok());
+        let folded: Vec<control::ControlChannel> = match (root, cid) {
+            (Some(r), Some(c)) => {
+                control::fetch_control_channels(&b.relays, &r, &hex::encode(c), b.root_epoch)
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let mut channels: Vec<Channel> = Vec::new();
+        // Grants privados do bundle, por id.
+        let grants: std::collections::HashMap<String, (String, u64)> = b
+            .channels
+            .iter()
+            .map(|c| (c.id.clone(), (c.key.clone(), c.epoch)))
+            .collect();
+        if let (Some(r), Some(_c)) = (root, cid) {
+            for f in &folded {
+                if f.is_private {
+                    // Privado só com grant; sem chave, omite (igual ao TS).
+                    if let Some((key, epoch)) = grants.get(&f.id) {
+                        channels.push(Channel {
+                            id: f.id.clone(),
+                            name: f.name.clone(),
+                            topic: format!("privado · epoch {epoch}"),
+                            is_voice: false,
+                            messages: Vec::new(),
+                            live_group: None,
+                            stream_sk: Some(key.clone()),
+                            stream_id: Some(f.id.clone()),
+                            stream_epoch: Some(*epoch),
+                        });
+                    }
+                } else if let Ok(id) = hex::decode(&f.id).and_then(|v| {
+                    v.try_into()
+                        .map_err(|_| hex::FromHexError::InvalidStringLength)
+                }) {
+                    let g = derive::group_key(derive::label::CHANNEL, &r, &id, b.root_epoch);
+                    channels.push(Channel {
+                        id: f.id.clone(),
+                        name: f.name.clone(),
+                        topic: format!("público · epoch {} · m = msgs", b.root_epoch),
+                        is_voice: false,
+                        messages: Vec::new(),
+                        live_group: None,
+                        stream_sk: Some(hex::encode(g.sk)),
+                        stream_id: Some(f.id.clone()),
+                        stream_epoch: Some(b.root_epoch),
+                    });
+                }
+            }
+        }
+        // Grants do bundle ainda sem fold (o fold pode atrasar num join fresco).
+        for gc in &b.channels {
+            if !channels.iter().any(|ch| ch.id == gc.id) {
+                channels.push(Channel {
+                    id: gc.id.clone(),
+                    name: if gc.name.is_empty() {
+                        format!("#{}", &gc.id[..8.min(gc.id.len())])
+                    } else {
+                        gc.name.clone()
+                    },
+                    topic: format!("grant · epoch {}", gc.epoch),
+                    is_voice: false,
+                    messages: Vec::new(),
+                    live_group: None,
+                    stream_sk: Some(gc.key.clone()),
+                    stream_id: Some(gc.id.clone()),
+                    stream_epoch: Some(gc.epoch),
+                });
+            }
+        }
+        let n = channels.len();
         self.communities.push(Community {
             id: format!("concord-{}", b.community_id),
             name: b.name.clone(),
@@ -610,25 +688,7 @@ impl App {
                 Some(primary)
             },
             relays: b.relays.clone(),
-            channels: b
-                .channels
-                .into_iter()
-                .map(|c| Channel {
-                    id: c.id.clone(),
-                    name: if c.name.is_empty() {
-                        format!("#{}", &c.id[..8.min(c.id.len())])
-                    } else {
-                        c.name.clone()
-                    },
-                    topic: format!("epoch {} · m = msgs E2EE", c.epoch),
-                    is_voice: false,
-                    messages: Vec::new(),
-                    live_group: None,
-                    stream_sk: Some(c.key),
-                    stream_id: Some(c.id),
-                    stream_epoch: Some(c.epoch),
-                })
-                .collect(),
+            channels,
         });
         self.sel_community = self.communities.len() - 1;
         self.sel_channel = 0;

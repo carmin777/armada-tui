@@ -23,7 +23,25 @@ fn main() -> anyhow::Result<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let b = inv::open_bundle(&ev, &p.link_signer, &p.token, now_ms)?;
     println!("frota: '{}' canais={}", b.name, b.channels.len());
-    println!("bundle debug: {b:#?}");
+    // Control plane: canais públicos derivam do root.
+    if let (Ok(root), Ok(cid)) = (hex::decode(&b.community_root), hex::decode(&b.community_id)) {
+        let root: [u8; 32] = root.try_into().expect("root32");
+        let _cid: [u8; 32] = cid.try_into().expect("cid32");
+        match armada_tui::concord::control::fetch_control_channels(
+            &b.relays,
+            &root,
+            &b.community_id,
+            b.root_epoch,
+        ) {
+            Ok(cc) => {
+                println!("control: {} canais", cc.len());
+                for c in &cc {
+                    println!("  #{} priv={}", c.name, c.is_private);
+                }
+            }
+            Err(e) => println!("control: {e:#}"),
+        }
+    }
 
     for c in &b.channels {
         println!(

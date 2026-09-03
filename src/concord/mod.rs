@@ -6,6 +6,7 @@
 //! Wire (streams): wrap(1059|21059) → seal(20013|20014) → rumor — descriptografia
 //! dos planos entra na próxima fase; aqui vão os primitivos com testes de interop.
 
+pub mod control;
 pub mod derive;
 pub mod invite;
 pub mod nip44;

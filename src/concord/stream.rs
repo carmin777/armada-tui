@@ -102,15 +102,23 @@ fn resolve_ms(created_at: i64, ev: &serde_json::Value) -> anyhow::Result<i64> {
     }
 }
 
-/// Abre um wrap da stream, validando tudo. `stream_sk` = segredo da stream
-/// (ex: channelGroupKey().sk); `stream_pk` = hex x-only do autor fixo.
-pub fn open_wrap(
+/// Rumor aberto sem checagem de binding (control plane usa vsk/eid/ev).
+pub struct OpenedStreamEvent {
+    pub kind: u64,
+    pub author: String,
+    pub content: String,
+    pub created_at: i64,
+    pub rumor_id: String,
+    pub seal_kind: u64,
+    pub tags: Vec<Vec<String>>,
+}
+
+/// Abre wrap→seal→rumor com todas as provas cripto, sem binding de canal.
+pub(crate) fn open_stream_event(
     wrap: &serde_json::Value,
     stream_sk: &[u8; 32],
     stream_pk: &str,
-    channel_id: &str,
-    epoch: u64,
-) -> anyhow::Result<OpenedRumor> {
+) -> anyhow::Result<OpenedStreamEvent> {
     let kind = wrap
         .get("kind")
         .and_then(|x| x.as_u64())
@@ -159,6 +167,46 @@ pub fn open_wrap(
     {
         anyhow::bail!("id do rumor não confere");
     }
+    let tags: Vec<Vec<String>> = r_tags
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| {
+                    t.as_array().map(|inner| {
+                        inner
+                            .iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(OpenedStreamEvent {
+        kind: r_kind,
+        author: r_pubkey,
+        content: r_content,
+        created_at: r_created,
+        rumor_id: str_field(&rumor, "id")?,
+        seal_kind,
+        tags,
+    })
+}
+
+/// Abre um wrap da stream, validando tudo. `stream_sk` = segredo da stream
+/// (ex: channelGroupKey().sk); `stream_pk` = hex x-only do autor fixo.
+pub fn open_wrap(
+    wrap: &serde_json::Value,
+    stream_sk: &[u8; 32],
+    stream_pk: &str,
+    channel_id: &str,
+    epoch: u64,
+) -> anyhow::Result<OpenedRumor> {
+    let o = open_stream_event(wrap, stream_sk, stream_pk)?;
+    let rumor: serde_json::Value = serde_json::json!({
+        "kind": o.kind, "pubkey": o.author, "created_at": o.created_at,
+        "tags": o.tags, "content": o.content,
+    });
     // Binding anti-splice: channel + epoch strict-equal.
     let ch = tag(&rumor, "channel").ok_or_else(|| anyhow::anyhow!("rumor sem channel"))?;
     if ch != channel_id {
@@ -169,10 +217,10 @@ pub fn open_wrap(
         anyhow::bail!("epoch {ep} ≠ esperada");
     }
     Ok(OpenedRumor {
-        kind: r_kind,
-        author: r_pubkey,
-        content: r_content,
-        ms: resolve_ms(r_created, &rumor)?,
+        kind: o.kind,
+        author: o.author,
+        content: o.content,
+        ms: resolve_ms(o.created_at, &rumor)?,
         channel: ch,
         epoch: ep,
     })
