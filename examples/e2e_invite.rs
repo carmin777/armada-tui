@@ -16,7 +16,10 @@ fn main() -> anyhow::Result<()> {
     println!("token: {}", hex::encode(p.token));
 
     let ev = inv::fetch_bundle_event(&p.relays, &p.link_signer)?;
-    println!("bundle evt: kind={} id={}", ev["kind"], ev["id"]);
+    println!(
+        "bundle evt: kind={} created_at={} id={}",
+        ev["kind"], ev["created_at"], ev["id"]
+    );
     let now_ms = chrono::Utc::now().timestamp_millis();
     let b = inv::open_bundle(&ev, &p.link_signer, &p.token, now_ms)?;
     println!("frota: '{}' canais={}", b.name, b.channels.len());

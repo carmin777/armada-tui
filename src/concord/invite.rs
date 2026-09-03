@@ -208,10 +208,13 @@ pub fn invite_bundle_key(token: &[u8]) -> [u8; 32] {
     hkdf32(token, &build_info("concord/invite-key", &ZERO32, None))
 }
 
-/// Busca o bundle 33301 do signer nos relays (primeiro que responder vale).
+/// Busca o bundle 33301 do signer em TODOS os relays e fica com o mais
+/// recente (relays dessincronizados: o primeiro a responder nem sempre
+/// tem a versão atual).
 pub fn fetch_bundle_event(relays: &[String], signer: &str) -> anyhow::Result<serde_json::Value> {
     let filter = serde_json::json!({"kinds": [KIND_INVITE_BUNDLE], "authors": [signer], "#d": [""], "limit": 5});
-    let mut last_err = anyhow::anyhow!("sem relays");
+    let mut best: Option<(i64, serde_json::Value)> = None;
+    let mut errors = Vec::new();
     for r in relays {
         match crate::nostr::req_events(
             r,
@@ -220,22 +223,28 @@ pub fn fetch_bundle_event(relays: &[String], signer: &str) -> anyhow::Result<ser
             std::time::Duration::from_secs(12),
         ) {
             Ok(evs) => {
-                // Prefere o mais recente com vsk live.
-                let mut evs = evs;
-                evs.sort_by_key(|e| e.created_at);
-                if let Some(ev) = evs.into_iter().rev().next() {
+                for e in evs {
                     let v = serde_json::json!({
-                        "id": ev.id, "pubkey": ev.pubkey, "created_at": ev.created_at,
-                        "kind": ev.kind, "tags": ev.tags, "content": ev.content, "sig": ev.sig,
+                        "id": e.id, "pubkey": e.pubkey, "created_at": e.created_at,
+                        "kind": e.kind, "tags": e.tags, "content": e.content, "sig": e.sig,
                     });
-                    return Ok(v);
+                    if best
+                        .as_ref()
+                        .map(|(t, _)| e.created_at > *t)
+                        .unwrap_or(true)
+                    {
+                        best = Some((e.created_at, v));
+                    }
                 }
-                last_err = anyhow::anyhow!("{r} sem bundle");
+                if best.is_none() {
+                    errors.push(format!("{r}: sem bundle"));
+                }
             }
-            Err(e) => last_err = e,
+            Err(e) => errors.push(format!("{r}: {e:#}")),
         }
     }
-    Err(anyhow::anyhow!("bundle não achado: {last_err:#}"))
+    best.map(|(_, v)| v)
+        .ok_or_else(|| anyhow::anyhow!("bundle não achado ({})", errors.join("; ")))
 }
 
 /// Verifica + descriptografa o bundle (revogado/expirado/owner-mismatch incluídos).
@@ -342,7 +351,8 @@ pub fn open_bundle(
     })
 }
 
-/// Busca wraps da stream (1059/21059 assinados pela stream) nos relays.
+/// Busca wraps da stream (1059/21059 assinados pela stream) em TODOS os
+/// relays, agrega e deduplica por id (cada relay tem visão parcial).
 pub fn fetch_wraps(
     relays: &[String],
     stream_pk: &str,
@@ -350,7 +360,9 @@ pub fn fetch_wraps(
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let filter =
         serde_json::json!({"kinds": [1059, 21059], "authors": [stream_pk], "limit": limit});
-    let mut last_err = anyhow::anyhow!("sem relays");
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
     for r in relays {
         match crate::nostr::req_events(
             r,
@@ -358,22 +370,24 @@ pub fn fetch_wraps(
             filter.clone(),
             std::time::Duration::from_secs(12),
         ) {
-            Ok(evs) if !evs.is_empty() => {
-                return Ok(evs
-                    .into_iter()
-                    .map(|e| {
-                        serde_json::json!({
+            Ok(evs) => {
+                for e in evs {
+                    if seen.insert(e.id.clone()) {
+                        out.push(serde_json::json!({
                             "id": e.id, "pubkey": e.pubkey, "created_at": e.created_at,
                             "kind": e.kind, "tags": e.tags, "content": e.content, "sig": e.sig,
-                        })
-                    })
-                    .collect());
+                        }));
+                    }
+                }
             }
-            Ok(_) => last_err = anyhow::anyhow!("{r} sem wraps"),
-            Err(e) => last_err = e,
+            Err(e) => errors.push(format!("{r}: {e:#}")),
         }
     }
-    Err(anyhow::anyhow!("wraps não achados: {last_err:#}"))
+    if out.is_empty() {
+        anyhow::bail!("wraps não achados ({})", errors.join("; "));
+    }
+    out.sort_by_key(|v| v.get("created_at").and_then(|x| x.as_i64()).unwrap_or(0));
+    Ok(out)
 }
 
 #[cfg(test)]
