@@ -8,7 +8,7 @@
 //! - Envio: relays do kind 10050 do destinatário (fallback: app relays).
 //! - `created_at` de seal/wrap randomizado até 48h p/ trás (anti-metadata).
 
-use super::nip44;
+use crate::concord::nip44;
 
 pub const KIND_SEAL: u64 = 13;
 pub const KIND_MSG: u64 = 14;
@@ -181,7 +181,7 @@ pub fn fetch_dm_relays(
             let mut evs = evs;
             evs.sort_by_key(|e| e.created_at);
             if let Some(e) = evs.into_iter().next_back() {
-                for t in e.tags.iter().flatten() {
+                for t in e.tags.iter() {
                     // tags: Vec<Vec<String>> — coleta ["relay", url].
                     if t.first().map(|s| s == "relay").unwrap_or(false) {
                         if let Some(u) = t.get(1) {
