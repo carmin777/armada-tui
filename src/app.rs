@@ -455,7 +455,7 @@ impl App {
     }
 
     fn live_keys(&self) -> Option<nostr::Keys> {
-        let secret = self.secret?;
+        let secret = self.secret.clone()?;
         let secp = secp256k1::Secp256k1::new();
         let sk = secp256k1::SecretKey::from_slice(&secret).ok()?;
         let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
@@ -904,6 +904,7 @@ impl App {
         text: String,
         ci: usize,
         chi: usize,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> OpResult {
         match nostr::send_chat(&relay, &keys, &group, &text, cancel) {
             Ok(id) => OpResult::Sent { ci, chi, text, id },
@@ -1003,10 +1004,10 @@ impl App {
         let primary = b.relays.first().cloned().unwrap_or_default();
         // Control plane: descobre canais (públicos derivam do root).
         use crate::concord::{control, derive};
-        let root: Option<zeroize::Zeroizing<[u8; 32]>> = hex::decode(&b.community_root)
+        let root: Option<[u8; 32]> = hex::decode(&b.community_root)
             .ok()
             .and_then(|v| v.try_into().ok());
-        let cid: Option<zeroize::Zeroizing<[u8; 32]>> = hex::decode(&b.community_id)
+        let cid: Option<[u8; 32]> = hex::decode(&b.community_id)
             .ok()
             .and_then(|v| v.try_into().ok());
         let folded: Vec<control::ControlChannel> = match (root, cid) {

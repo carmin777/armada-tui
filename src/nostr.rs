@@ -808,7 +808,13 @@ pub fn publish_concord(
     for r in relays {
         let (tx, wrap, keys) = (tx.clone(), wrap.clone(), keys.cloned());
         std::thread::spawn(move || {
-            let out = publish(&r, keys.as_ref(), wrap, Duration::from_secs(20));
+            let out = publish(
+                &r,
+                keys.as_ref(),
+                wrap,
+                Duration::from_secs(20),
+                cancel.clone(),
+            );
             let _ = tx.send(out.is_ok());
         });
     }
