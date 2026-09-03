@@ -1,8 +1,9 @@
 //! DM E2EE live (headless).
-//! - Self: cargo run --example dm_live -- <relay> <texto>
-//! - A→B: cargo run --example dm_live -- <relay> <texto> --peer
-//!   (gera A e B, A manda p/ B, lê como B e compara).
-//! Gera identidade throwaway, manda DM p/ si, lê de volta e compara.
+//!
+//! Self: `cargo run --example dm_live -- <relay> <texto>`
+//!
+//! A→B: `cargo run --example dm_live -- <relay> <texto> --peer`
+//! (gera A e B, A manda p/ B, lê como B e compara).
 
 use armada_tui::{dm, nostr};
 
