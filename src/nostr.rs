@@ -81,7 +81,8 @@ pub(crate) fn req_events(
                 std::thread::spawn(move || {
                     let _ = tx2.send(tungstenite::connect(&url2));
                 });
-                rx2.recv_timeout(Duration::from_secs(10))?? as Result<_, tungstenite::Error>
+                rx2.recv_timeout(Duration::from_secs(10))
+                    .map_err(|_| anyhow::anyhow!("connect timeout (10s)"))??
             }?;
             arm_timeouts(&mut socket);
             socket.send(tungstenite::Message::Text(req))?;
@@ -493,7 +494,8 @@ pub fn publish(
                 std::thread::spawn(move || {
                     let _ = tx2.send(tungstenite::connect(&url2));
                 });
-                rx2.recv_timeout(Duration::from_secs(10))?? as Result<_, tungstenite::Error>
+                rx2.recv_timeout(Duration::from_secs(10))
+                    .map_err(|_| anyhow::anyhow!("connect timeout (10s)"))??
             }?;
             arm_timeouts(&mut socket);
             let mut flow = PublishFlow::new(id.clone());

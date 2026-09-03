@@ -115,33 +115,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blocklist_ssrf() {
-        for h in [
-            "localhost",
-            "127.0.0.1",
-            "10.0.0.5",
-            "192.168.1.1",
-            "172.16.0.9",
-            "172.31.255.1",
-            "169.254.169.254",
-            "::1",
-            "x.local",
-            "y.internal",
-            "z.lan",
-        ] {
-            assert!(host_bloqueado(h), "{h} deveria bloquear");
-        }
-        for h in [
-            "relay.ditto.pub",
-            "blossom.primal.net",
-            "8.8.8.8",
-            "172.32.0.1",
-            "11.0.0.1",
-        ] {
-            assert!(!host_bloqueado(h), "{h} não deveria bloquear");
-        }
-        assert!(check_url("https://blossom.primal.net/x.png").is_ok());
-        assert!(check_url("http://169.254.169.254/meta").is_err());
-        assert!(check_url("file:///etc/passwd").is_err());
+    fn politica_central_cobre_viewer() {
+        use crate::netpolicy;
+        assert!(netpolicy::check_http_url("http://x@127.0.0.1/a.png").is_err());
+        assert!(netpolicy::check_http_url("https://blossom.primal.net/x.png").is_ok());
     }
 }
