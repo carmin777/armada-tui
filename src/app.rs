@@ -641,7 +641,7 @@ impl App {
                     v.try_into()
                         .map_err(|_| hex::FromHexError::InvalidStringLength)
                 }) {
-                    let g = derive::group_key(derive::label::CHANNEL, &r, &id, b.root_epoch);
+                    let g = derive::group_key(derive::label::CHANNEL, &r, &id, Some(b.root_epoch));
                     channels.push(Channel {
                         id: f.id.clone(),
                         name: f.name.clone(),
