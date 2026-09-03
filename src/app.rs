@@ -642,7 +642,7 @@ impl App {
             match (self.current_community(), self.current_channel()) {
                 (Some(c), Some(ch)) => match (&ch.stream_sk, &ch.stream_id, ch.stream_epoch) {
                     (Some(sk), Some(id), Some(ep)) => {
-                        (c.relays.clone(), sk.clone(), id.clone(), *ep)
+                        (c.relays.clone(), sk.clone(), id.clone(), ep)
                     }
                     _ => {
                         self.status = "canal sem chave Concord (entre com invite: I)".to_string();

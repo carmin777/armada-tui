@@ -160,7 +160,7 @@ pub fn parse_invite_link(input: &str) -> Option<ParsedInvite> {
             let marker = "/invite/";
             let pos = path.find(marker)?;
             Some((
-                path[pos + marker.len()].trim_end_matches('/').to_string(),
+                path[pos + marker.len()..].trim_end_matches('/').to_string(),
                 frag.to_string(),
             ))
         } else {
@@ -389,14 +389,14 @@ mod tests {
     #[test]
     fn bundle_roundtrip_referencia() {
         // Fixture gerada pelo nostr-tools (bundle_gen.mjs).
-        let url = super::super::invite_fixture::BUNDLE_URL;
+        let url = super::fixture::BUNDLE_URL;
         let p = parse_invite_link(url).expect("link válido");
-        assert_eq!(p.link_signer, super::super::invite_fixture::BUNDLE_SIGNER);
+        assert_eq!(p.link_signer, super::fixture::BUNDLE_SIGNER);
         assert_eq!(p.token, [0xaa; 16]);
         assert_eq!(p.relays, STOCK_RELAYS);
 
         let ev: serde_json::Value =
-            serde_json::from_str(super::super::invite_fixture::BUNDLE_EVENT_JSON).unwrap();
+            serde_json::from_str(super::fixture::BUNDLE_EVENT_JSON).unwrap();
         let b = open_bundle(&ev, &p.link_signer, &p.token, 1719800000000).unwrap();
         assert_eq!(b.name, "frota-teste");
         assert_eq!(b.channels.len(), 1);
