@@ -25,9 +25,16 @@ pub fn supported() -> bool {
 /// alheia — sem isso um rumor malicioso sondaria a rede local/nuvem).
 fn host_bloqueado(host: &str) -> bool {
     let h = host.to_lowercase();
-    // Descasca porta e colchetes IPv6.
-    let h = h.rsplit(':').next().unwrap_or(&h);
-    let h = h.trim_matches(|c| c == '[' || c == ']');
+    // IPv6 entre colchetes, com ou sem porta: [::1], [::1]:8080.
+    if let Some(rest) = h.strip_prefix('[') {
+        let inner = rest.split(']').next().unwrap_or("");
+        return inner == "::1" || inner.is_empty();
+    }
+    // Tira :porta quando há um único ':' e o resto é numérico.
+    let h = match h.rsplit_once(':') {
+        Some((left, port)) if !left.contains(':') && port.parse::<u16>().is_ok() => left,
+        _ => h.as_str(),
+    };
     if ["localhost", ""].contains(&h) {
         return true;
     }
@@ -58,7 +65,11 @@ fn host_bloqueado(host: &str) -> bool {
             return true;
         }
     }
-    h == "::1"
+    // IPv6 loopback/ULA literais (só quando é literal, com ':').
+    if h == "::1" || (h.contains(':') && (h.starts_with("fc") || h.starts_with("fd"))) {
+        return true;
+    }
+    false
 }
 
 fn check_url(url: &str) -> anyhow::Result<()> {
