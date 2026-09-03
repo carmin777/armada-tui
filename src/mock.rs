@@ -38,6 +38,7 @@ pub fn mock_communities() -> Vec<Community> {
             kind: CommunityKind::Concord,
             unread: 3,
             relay: None,
+            relays: Vec::new(),
             channels: vec![
                 Channel {
                     id: "general".to_string(),
@@ -45,6 +46,9 @@ pub fn mock_communities() -> Vec<Community> {
                     topic: "chat geral da frota (E2EE, sem servidor)".to_string(),
                     is_voice: false,
                     live_group: None,
+                    stream_sk: None,
+                    stream_id: None,
+                    stream_epoch: None,
                     messages: vec![
                         msg(
                             "atlas",
@@ -67,6 +71,9 @@ pub fn mock_communities() -> Vec<Community> {
                     topic: "concord-v2 client-side, relays genéricos".to_string(),
                     is_voice: false,
                     live_group: None,
+                    stream_sk: None,
+                    stream_id: None,
+                    stream_epoch: None,
                     messages: vec![
                         msg(
                             "atlas",
@@ -83,6 +90,9 @@ pub fn mock_communities() -> Vec<Community> {
                     topic: "voz WebRTC via LiveKit (terminal: só presença)".to_string(),
                     is_voice: true,
                     live_group: None,
+                    stream_sk: None,
+                    stream_id: None,
+                    stream_epoch: None,
                     messages: vec![msg(
                         "sistema",
                         "3 na chamada — áudio E2E só no app gráfico",
@@ -98,6 +108,7 @@ pub fn mock_communities() -> Vec<Community> {
             kind: CommunityKind::Nip29,
             unread: 0,
             relay: None,
+            relays: Vec::new(),
             channels: vec![
                 Channel {
                     id: "ann".to_string(),
@@ -105,6 +116,9 @@ pub fn mock_communities() -> Vec<Community> {
                     topic: "grupo NIP-29 num relay externo".to_string(),
                     is_voice: false,
                     live_group: None,
+                    stream_sk: None,
+                    stream_id: None,
+                    stream_epoch: None,
                     messages: vec![msg(
                         "relay-admin",
                         "relay wss://exemplo.br atualizado",
@@ -118,6 +132,9 @@ pub fn mock_communities() -> Vec<Community> {
                     topic: "membership/moderation no relay".to_string(),
                     is_voice: false,
                     live_group: None,
+                    stream_sk: None,
+                    stream_id: None,
+                    stream_epoch: None,
                     messages: vec![],
                 },
             ],

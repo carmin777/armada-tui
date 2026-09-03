@@ -24,8 +24,12 @@ pub struct Channel {
     pub topic: String,
     pub is_voice: bool,
     pub messages: Vec<Message>,
-    /// Grupo NIP-29 real quando `Some` (id do grupo); `None` = mock local.
+    /// Grupo NIP-29 real quando `Some` (id do grupo); `None` = mock ou Concord.
     pub live_group: Option<String>,
+    /// Stream Concord (canal com chave): segredo/id/epoch quando `Some`.
+    pub stream_sk: Option<String>,
+    pub stream_id: Option<String>,
+    pub stream_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +41,8 @@ pub struct Community {
     pub unread: usize,
     /// Relay de origem quando buscado ao vivo (`r`); `None` = mock local.
     pub relay: Option<String>,
+    /// Todos os relays da comunidade (bundle Concord ou live NIP-29).
+    pub relays: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

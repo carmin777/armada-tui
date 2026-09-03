@@ -57,6 +57,7 @@ pub enum PendingOp {
     Messages,
     Send,
     Join,
+    Invite,
 }
 
 pub struct App {
@@ -82,6 +83,8 @@ pub struct App {
     pub view_url: Option<String>,
     pub secret: Option<[u8; 32]>,
     pub live_write: bool,
+    pub invite_mode: bool,
+    pub invite_input: String,
     pub should_quit: bool,
 }
 
@@ -110,6 +113,8 @@ impl App {
             view_url: None,
             secret: None,
             live_write: false,
+            invite_mode: false,
+            invite_input: String::new(),
             should_quit: false,
         }
     }
@@ -427,7 +432,8 @@ impl App {
         self.status = format!("buscando grupos NIP-29 em {relay}…");
         match nostr::fetch_groups(&relay) {
             Ok(groups) => {
-                self.communities.retain(|c| c.relay.is_none());
+                self.communities
+                    .retain(|c| c.relay.is_none() || c.kind == CommunityKind::Concord);
                 let n = groups.len();
                 for g in groups {
                     self.communities.push(Community {
@@ -436,6 +442,7 @@ impl App {
                         kind: CommunityKind::Nip29,
                         unread: 0,
                         relay: Some(relay.clone()),
+                        relays: vec![relay.clone()],
                         channels: vec![Channel {
                             id: "chat".to_string(),
                             name: "chat".to_string(),
@@ -447,6 +454,9 @@ impl App {
                             is_voice: false,
                             messages: Vec::new(),
                             live_group: Some(g.id.clone()),
+                            stream_sk: None,
+                            stream_id: None,
+                            stream_epoch: None,
                         }],
                     });
                 }
@@ -459,7 +469,12 @@ impl App {
     }
 
     /// Fase 1: busca mensagens do grupo live atual (kinds 1/9/11 + tag h).
+    /// Se o canal for Concord com chave, descriptografa os wraps em vez disso.
     pub fn fetch_live_messages(&mut self) {
+        if matches!(self.current_channel(), Some(ch) if ch.stream_sk.is_some()) {
+            self.do_concord_messages();
+            return;
+        }
         let (relay, group) = match (self.current_community(), self.current_channel()) {
             (Some(c), Some(ch)) => match (&c.relay, &ch.live_group) {
                 (Some(r), Some(g)) => (r.clone(), g.clone()),
@@ -511,5 +526,192 @@ impl App {
             }
         }
         None
+    }
+
+    /// Aplica chaves (login com nsec ou conta gerada).
+    pub fn apply_keys(&mut self, keys: &nostr::Keys, label: &str) {
+        let suffix: String = keys
+            .npub
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        self.npub = format!("{}…{}{}", &keys.npub[..9], suffix, label);
+        self.secret = Some(keys.secret);
+        self.live_write = true;
+        self.authed = true;
+        self.screen = Screen::Server;
+        self.login_error = None;
+        self.login_input.clear();
+        self.status = format!(
+            "chave ok ({}) — escrita live via {}",
+            self.npub,
+            self.relays
+                .app_relays
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("?")
+        );
+    }
+
+    /// Conta de brincadeira: gera identidade aleatória e entra.
+    pub fn login_generated(&mut self) {
+        match nostr::generate() {
+            Ok(k) => self.apply_keys(&k, " (brincadeira)"),
+            Err(e) => self.status = format!("falha ao gerar: {e:#}"),
+        }
+    }
+
+    /// Invite Concord: parse link → bundle → comunidade com chaves.
+    pub fn do_invite(&mut self) {
+        use crate::concord::invite as inv;
+        let link = self.invite_input.trim().to_string();
+        self.invite_input.clear();
+        self.invite_mode = false;
+        if link.is_empty() {
+            return;
+        }
+        let p = match inv::parse_invite_link(&link) {
+            Some(p) => p,
+            None => {
+                self.status = "link não parece invite Concord (…/invite/<naddr>#…)".to_string();
+                return;
+            }
+        };
+        self.status = format!("buscando bundle em {} relays…", p.relays.len());
+        let ev = match inv::fetch_bundle_event(&p.relays, &p.link_signer) {
+            Ok(ev) => ev,
+            Err(e) => {
+                self.status = format!("bundle não achado: {e:#}");
+                return;
+            }
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let b = match inv::open_bundle(&ev, &p.link_signer, &p.token, now_ms) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("convite inválido: {e:#}");
+                return;
+            }
+        };
+        let primary = b.relays.first().cloned().unwrap_or_default();
+        let n = b.channels.len();
+        self.communities.push(Community {
+            id: format!("concord-{}", b.community_id),
+            name: b.name.clone(),
+            kind: CommunityKind::Concord,
+            unread: 0,
+            relay: if primary.is_empty() {
+                None
+            } else {
+                Some(primary)
+            },
+            relays: b.relays.clone(),
+            channels: b
+                .channels
+                .into_iter()
+                .map(|c| Channel {
+                    id: c.id.clone(),
+                    name: if c.name.is_empty() {
+                        format!("#{}", &c.id[..8.min(c.id.len())])
+                    } else {
+                        c.name.clone()
+                    },
+                    topic: format!("epoch {} · m = msgs E2EE", c.epoch),
+                    is_voice: false,
+                    messages: Vec::new(),
+                    live_group: None,
+                    stream_sk: Some(c.key),
+                    stream_id: Some(c.id),
+                    stream_epoch: Some(c.epoch),
+                })
+                .collect(),
+        });
+        self.sel_community = self.communities.len() - 1;
+        self.sel_channel = 0;
+        self.status = format!("frota '{}' com {n} canais (m = descriptografar)", b.name);
+    }
+
+    /// Lê o chat E2EE do canal Concord atual (wraps → open → kind 9).
+    pub fn do_concord_messages(&mut self) {
+        use crate::concord::{invite as inv, stream};
+        let (relays, sk_hex, ch_id, epoch) =
+            match (self.current_community(), self.current_channel()) {
+                (Some(c), Some(ch)) => match (&ch.stream_sk, &ch.stream_id, ch.stream_epoch) {
+                    (Some(sk), Some(id), Some(ep)) => {
+                        (c.relays.clone(), sk.clone(), id.clone(), *ep)
+                    }
+                    _ => {
+                        self.status = "canal sem chave Concord (entre com invite: I)".to_string();
+                        return;
+                    }
+                },
+                _ => {
+                    self.status = "nada selecionado".to_string();
+                    return;
+                }
+            };
+        let sk: [u8; 32] = match hex::decode(&sk_hex).ok().and_then(|b| b.try_into().ok()) {
+            Some(b) => b,
+            None => {
+                self.status = "chave do canal inválida".to_string();
+                return;
+            }
+        };
+        let secp = secp256k1::Secp256k1::new();
+        let kp = match secp256k1::SecretKey::from_slice(&sk)
+            .map(|s| secp256k1::Keypair::from_secret_key(&secp, &s))
+        {
+            Ok(k) => k,
+            Err(_) => {
+                self.status = "chave do canal inválida".to_string();
+                return;
+            }
+        };
+        let (xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
+        let stream_pk = format!("{xonly}");
+        self.status = format!("buscando wraps em {} relays…", relays.len());
+        let wraps = match inv::fetch_wraps(&relays, &stream_pk, 50) {
+            Ok(w) => w,
+            Err(e) => {
+                self.status = format!("wraps: {e:#}");
+                return;
+            }
+        };
+        let my_pk = self.live_keys().map(|k| k.pubkey_hex).unwrap_or_default();
+        let mut msgs: Vec<(i64, Message)> = Vec::new();
+        let mut fails = 0usize;
+        for w in &wraps {
+            match stream::open_wrap(w, &sk, &stream_pk, &ch_id, epoch) {
+                Ok(r) if r.kind == 9 => msgs.push((
+                    r.ms,
+                    Message {
+                        author: if r.author == my_pk {
+                            "você".to_string()
+                        } else {
+                            r.author[..8.min(r.author.len())].to_string()
+                        },
+                        content: r.content,
+                        time: chrono::DateTime::from_timestamp_millis(r.ms)
+                            .map(|d| d.format("%d/%m %H:%M").to_string())
+                            .unwrap_or_else(|| "?".to_string()),
+                        mine: r.author == my_pk,
+                    },
+                )),
+                Ok(_) => {}
+                Err(_) => fails += 1,
+            }
+        }
+        msgs.sort_by_key(|(ms, _)| *ms);
+        let n = msgs.len();
+        if let Some(comm) = self.communities.get_mut(self.sel_community) {
+            if let Some(ch) = comm.channels.get_mut(self.sel_channel) {
+                ch.messages = msgs.into_iter().map(|(_, m)| m).collect();
+            }
+        }
+        self.status = format!("{n} msgs E2EE ({fails} wraps ignorados)");
     }
 }

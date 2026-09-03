@@ -57,7 +57,7 @@ fn event_id(
 }
 
 /// `verifyEvent`: id confere + schnorr válida (BIP-340).
-fn verify_event(ev: &serde_json::Value) -> anyhow::Result<()> {
+pub(crate) fn verify_event(ev: &serde_json::Value) -> anyhow::Result<()> {
     let pubkey = str_field(ev, "pubkey")?;
     let created_at = ev
         .get("created_at")

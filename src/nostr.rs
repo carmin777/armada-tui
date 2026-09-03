@@ -60,7 +60,7 @@ fn fmt_time(ts: i64) -> String {
 /// REQ genérico: conecta, manda filtro, coleta EVENTs até EOSE ou deadline.
 /// Roda numa thread filha; a principal espera com `timeout` (thread órfã
 /// bloqueada em read é abandonada — aceitável no MVP).
-fn req_events(
+pub(crate) fn req_events(
     relay_url: &str,
     sub_id: &str,
     filter: serde_json::Value,
@@ -180,6 +180,36 @@ pub fn parse_secret(input: &str) -> anyhow::Result<Keys> {
             .try_into()
             .map_err(|_| anyhow::anyhow!("esperava nsec1 ou hex de 64 chars"))?
     };
+    let secp = secp256k1::Secp256k1::new();
+    let sk = secp256k1::SecretKey::from_slice(&raw)?;
+    let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
+    let (xonly, _parity) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
+    let pubkey_hex = format!("{xonly}");
+    let npub = bech32::encode(
+        "npub",
+        xonly.serialize().to_vec().to_base32(),
+        bech32::Variant::Bech32,
+    )?;
+    Ok(Keys {
+        secret: raw,
+        pubkey_hex,
+        npub,
+    })
+}
+
+/// Conta de brincadeira: gera segredo aleatório (CSPRNG) e deriva tudo.
+pub fn generate() -> anyhow::Result<Keys> {
+    loop {
+        let mut raw = [0u8; 32];
+        getrandom::getrandom(&mut raw)?;
+        if secp256k1::SecretKey::from_slice(&raw).is_ok() {
+            return keys_from_secret(raw);
+        }
+    }
+}
+
+fn keys_from_secret(raw: [u8; 32]) -> anyhow::Result<Keys> {
+    use bech32::ToBase32;
     let secp = secp256k1::Secp256k1::new();
     let sk = secp256k1::SecretKey::from_slice(&raw)?;
     let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);

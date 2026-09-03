@@ -79,7 +79,7 @@ fn render_welcome(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         )),
         Line::from("Comunidades E2EE serverless (Concord) + grupos NIP-29 via relays Nostr."),
         Line::from(""),
-        Line::from("Login (fase 2: nsec1/hex habilita escrita; outro valor = só leitura):"),
+        Line::from("Login (nsec1/hex = escrita · g com campo vazio = conta de brincadeira):"),
         Line::from(format!("> {}", app.login_input)),
         Line::from(""),
         Line::from(match &app.login_error {
@@ -218,10 +218,12 @@ fn render_server(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         .wrap(Wrap { trim: false });
     f.render_widget(mp, right[0]);
 
-    let prompt = if app.input_mode {
+    let prompt = if app.invite_mode {
+        format!("convite: {}▌  (Enter abre · Esc cancela)", app.invite_input)
+    } else if app.input_mode {
         format!("> {}▌", app.input)
     } else {
-        "i digitar · r grupos live · m msgs live · v imagem kitty".to_string()
+        "i digitar · I invite · r grupos · m msgs/E2EE · v imagem · J join".to_string()
     };
     let inp = Paragraph::new(prompt).block(Block::default().borders(Borders::ALL).title(
         pane_title("mensagem", app.input_mode || app.focus == Focus::Messages),
@@ -346,7 +348,8 @@ fn render_help(f: &mut Frame, _app: &mut App, area: ratatui::layout::Rect) {
         Line::from("q sair · 1-7 trocar tela · ? ajuda"),
         Line::from("Tab alterna foco (frota → canais → mensagens)"),
         Line::from("j/k ou ↑/↓ navegar · i digitar · Enter enviar · Esc cancelar"),
-        Line::from("r grupos live · m msgs do grupo · v imagem (kitty) · J join (9021)"),
+        Line::from("r grupos NIP-29 · m msgs (Concord com chave = descriptografa E2EE)"),
+        Line::from("I abre invite …/invite/<naddr>#… · v imagem (kitty) · J join (9021)"),
         Line::from("Enter em canal ⚡ com nsec publica de verdade (NIP-42 se pedido)"),
         Line::from("o logout (na tela Settings) · ⚡ = comunidade live"),
         Line::from(""),

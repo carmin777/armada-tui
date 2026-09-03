@@ -70,6 +70,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 app::PendingOp::Messages => app.fetch_live_messages(),
                 app::PendingOp::Send => app.do_send(),
                 app::PendingOp::Join => app.do_join(),
+                app::PendingOp::Invite => app.do_invite(),
             }
             continue;
         }
@@ -140,12 +141,36 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     // Modo de digitação (login, mensagem)
     if app.screen == Screen::Welcome && !app.authed {
         match code {
+            KeyCode::Char('g') if app.login_input.is_empty() => {
+                app.login_generated();
+                return;
+            }
             KeyCode::Char(c) => app.login_input.push(c),
             KeyCode::Backspace => {
                 app.login_input.pop();
             }
             KeyCode::Enter => app.login(),
             KeyCode::Esc => app.should_quit = true,
+            _ => {}
+        }
+        return;
+    }
+
+    // Entrada do link de invite (tela Server, tecla I).
+    if app.invite_mode {
+        match code {
+            KeyCode::Char(c) => app.invite_input.push(c),
+            KeyCode::Backspace => {
+                app.invite_input.pop();
+            }
+            KeyCode::Enter => {
+                app.status = "abrindo invite…".to_string();
+                app.pending = Some(app::PendingOp::Invite);
+            }
+            KeyCode::Esc => {
+                app.invite_mode = false;
+                app.invite_input.clear();
+            }
             _ => {}
         }
         return;
@@ -225,6 +250,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             if app.screen == Screen::Server {
                 app.status = "enviando join 9021…".to_string();
                 app.pending = Some(app::PendingOp::Join);
+            }
+        }
+        KeyCode::Char('I') => {
+            if app.screen == Screen::Server {
+                app.invite_mode = true;
+                app.invite_input.clear();
             }
         }
         _ => {}

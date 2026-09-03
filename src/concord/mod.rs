@@ -7,6 +7,7 @@
 //! dos planos entra na próxima fase; aqui vão os primitivos com testes de interop.
 
 pub mod derive;
+pub mod invite;
 pub mod nip44;
 pub mod stream;
 
