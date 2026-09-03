@@ -728,7 +728,10 @@ impl App {
                 pk: format!("{xonly}"),
                 ch_id: id.clone(),
                 epoch: ep,
-                my_pk: self.live_keys().map(|k| k.pubkey_hex.clone()).unwrap_or_default(),
+                my_pk: self
+                    .live_keys()
+                    .map(|k| k.pubkey_hex.clone())
+                    .unwrap_or_default(),
                 auth: self.secret,
             });
         }
