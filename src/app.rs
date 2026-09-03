@@ -1001,6 +1001,7 @@ impl App {
                 Some(primary)
             },
             relays: b.relays.clone(),
+            voice: false,
             channels,
         })
     }
