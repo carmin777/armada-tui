@@ -651,7 +651,10 @@ pub enum ReadAction {
 
 impl ReadFlow {
     pub fn new() -> Self {
-        Self { authed: false, pending_auth: None }
+        Self {
+            authed: false,
+            pending_auth: None,
+        }
     }
 
     pub fn note_auth_sent(&mut self, auth_id: String) {

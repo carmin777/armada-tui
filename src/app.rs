@@ -304,7 +304,8 @@ impl App {
         self.busy = None;
         self.pending = None;
         // Cancela rede em voo (workers checam antes de assinar/enviar).
-        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.session = self.session.wrapping_add(1);
         self.live_write = false;
@@ -581,6 +582,7 @@ impl App {
             session: self.session,
         });
     }
+}
 
 /// Linha de status de leitura: presença Some(vazia) = sala vazia de verdade;
 /// None = consulta falhou (não mente "0 na chamada").
@@ -637,7 +639,7 @@ impl App {
                     }
                 }
                 self.msg_scroll = 0;
-                self.status = Self::presence_status(n, presence_known.then_some(&presence[..]));
+                self.status = presence_status(n, presence_known.then_some(&presence[..]));
             }
             OpResult::Sent { ci, chi, text, id } => {
                 self.input.clear();
@@ -1011,10 +1013,15 @@ impl App {
             .ok()
             .and_then(|v| v.try_into().ok());
         let folded: Vec<control::ControlChannel> = match (root, cid) {
-            (Some(r), Some(c)) => {
-                control::fetch_control_channels(&b.relays, &r, &hex::encode(c), b.root_epoch, auth, cancel)
-                    .unwrap_or_default()
-            }
+            (Some(r), Some(c)) => control::fetch_control_channels(
+                &b.relays,
+                &r,
+                &hex::encode(c),
+                b.root_epoch,
+                auth,
+                cancel,
+            )
+            .unwrap_or_default(),
             _ => Vec::new(),
         };
         let mut channels: Vec<Channel> = Vec::new();
@@ -1105,12 +1112,12 @@ mod tests {
     fn presenca_nao_mente() {
         // Sala com gente → mostra.
         assert_eq!(
-            App::presence_status(5, Some(&["aabbccddeeff00112233445566778899".to_string()])),
+            presence_status(5, Some(&["aabbccddeeff00112233445566778899".to_string()])),
             "5 msgs · 🔊 1 na chamada (aabbccdd)"
         );
         // Sala vazia de verdade → sem 🔊.
-        assert_eq!(App::presence_status(5, Some(&[])), "5 msgs");
+        assert_eq!(presence_status(5, Some(&[])), "5 msgs");
         // Consulta falhou → sem 🔊 (não mente "0 na chamada").
-        assert_eq!(App::presence_status(5, None), "5 msgs");
+        assert_eq!(presence_status(5, None), "5 msgs");
     }
 }
