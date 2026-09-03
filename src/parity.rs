@@ -24,7 +24,7 @@ struct Matrix {
 }
 
 pub fn load() -> Vec<Feature> {
-    let raw = include_str!("../../parity.json");
+    let raw = include_str!("../parity.json");
     let m: Matrix = serde_json::from_str(raw).expect("parity.json válido");
     assert_eq!(m.version, 1, "versão da matriz");
     m.features
