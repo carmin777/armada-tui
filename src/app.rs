@@ -60,6 +60,7 @@ pub enum PendingOp {
     Send,
     Join,
     Invite,
+    Image,
 }
 
 /// Resultado que o worker devolve para a thread da UI aplicar.
@@ -70,6 +71,7 @@ pub enum OpResult {
         chi: usize,
         messages: Vec<Message>,
         presence: Vec<String>,
+        presence_known: bool,
     },
     Sent {
         ci: usize,
@@ -79,6 +81,10 @@ pub enum OpResult {
     },
     Joined(String),
     Invited(Community),
+    Image {
+        url: String,
+        bytes: Vec<u8>,
+    },
     Failed(String),
 }
 
@@ -103,6 +109,7 @@ pub enum MsgTarget {
         relay: String,
         group: String,
         voice: bool,
+        auth: Option<[u8; 32]>,
     },
     Concord {
         relays: Vec<String>,
@@ -111,6 +118,7 @@ pub enum MsgTarget {
         ch_id: String,
         epoch: u64,
         my_pk: String,
+        auth: Option<[u8; 32]>,
     },
 }
 
@@ -135,7 +143,7 @@ pub struct App {
     pub discover: Vec<(String, String)>,
     pub pending: Option<PendingOp>,
     pub busy: Option<BusyOp>,
-    pub view_url: Option<String>,
+    pub view_image: Option<(String, Vec<u8>)>,
     pub secret: Option<[u8; 32]>,
     pub live_write: bool,
     pub invite_mode: bool,
@@ -173,7 +181,7 @@ impl App {
             discover: mock::mock_discover(),
             pending: None,
             busy: None,
-            view_url: None,
+            view_image: None,
             secret: None,
             live_write: false,
             invite_mode: false,
@@ -253,18 +261,24 @@ impl App {
         self.authed = true;
         self.screen = Screen::Server;
         self.login_error = None;
-        // P1-4: o segredo digitado sai da memória imediatamente.
-        self.login_input.clear();
+        // Segredo digitado: zeroíza o buffer (clear() sozinho deixaria os
+        // bytes na capacidade alocada) e libera.
+        Self::wipe_string(&mut self.login_input);
+    }
+
+    fn wipe_string(s: &mut String) {
+        use zeroize::Zeroize;
+        s.as_bytes_mut().zeroize();
+        s.clear();
+        s.shrink_to_fit();
     }
 
     pub fn logout(&mut self) {
         use zeroize::Zeroize;
         self.authed = false;
         self.screen = Screen::Welcome;
-        self.login_input.clear();
-        self.login_input.zeroize();
-        self.invite_input.clear();
-        self.invite_input.zeroize();
+        Self::wipe_string(&mut self.login_input);
+        Self::wipe_string(&mut self.invite_input);
         // Chave da sessão + chaves E2EE dos canais: zeroíza tudo.
         if let Some(mut s) = self.secret.take() {
             s.zeroize();
@@ -464,9 +478,10 @@ impl App {
         let (label, worker): (String, Box<dyn FnOnce() -> OpResult + Send>) = match op {
             PendingOp::Groups => {
                 let relay = self.relays.app_relays.first().cloned().unwrap_or_default();
+                let auth = self.secret;
                 (
                     format!("grupos em {relay}"),
-                    Box::new(move || Self::op_fetch_groups(relay)),
+                    Box::new(move || Self::op_fetch_groups(relay, auth)),
                 )
             }
             PendingOp::Messages => match self.snapshot_msg_target() {
@@ -523,11 +538,22 @@ impl App {
                 if link.is_empty() {
                     return;
                 }
+                let auth = self.secret;
                 (
                     "invite…".to_string(),
-                    Box::new(move || Self::op_invite(link)),
+                    Box::new(move || Self::op_invite(link, auth)),
                 )
             }
+            PendingOp::Image => match self.first_image_url() {
+                Some(url) => (
+                    "baixando imagem…".to_string(),
+                    Box::new(move || Self::op_image(url)),
+                ),
+                None => {
+                    self.status = "nenhuma URL nas mensagens visíveis".to_string();
+                    return;
+                }
+            },
         };
         self.status = format!("ocupado: {label}");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -575,6 +601,7 @@ impl App {
                 chi,
                 messages,
                 presence,
+                presence_known,
             } => {
                 let n = messages.len();
                 if let Some(comm) = self.communities.get_mut(ci) {
@@ -583,7 +610,7 @@ impl App {
                     }
                 }
                 self.msg_scroll = 0;
-                self.status = if presence.is_empty() {
+                self.status = if presence_known && !presence.is_empty() {
                     format!("{n} msgs")
                 } else {
                     let who: Vec<String> = presence
@@ -621,6 +648,13 @@ impl App {
                 self.sel_channel = 0;
                 self.status = format!("frota '{name}' com {n} canais (m = descriptografar)");
             }
+            OpResult::Image { url, bytes } => {
+                if !crate::kitty::supported() {
+                    self.status = format!("sem kitty graphics; URL: {url}");
+                    return;
+                }
+                self.view_image = Some((url, bytes));
+            }
             OpResult::Failed(e) => {
                 // P2-7: rascunho preservado — texto volta pro input p/ retry.
                 if !self.input.trim().is_empty() {
@@ -628,6 +662,14 @@ impl App {
                 }
                 self.status = format!("falha: {e}");
             }
+        }
+    }
+
+    /// Baixa imagem no worker (nunca na thread da UI).
+    fn op_image(url: String) -> OpResult {
+        match crate::kitty::fetch_png(&url) {
+            Ok(bytes) => OpResult::Image { url, bytes },
+            Err(e) => OpResult::Failed(format!("imagem: {e:#}")),
         }
     }
 
@@ -687,6 +729,7 @@ impl App {
                 ch_id: id.clone(),
                 epoch: ep,
                 my_pk: self.live_keys().map(|k| k.pubkey_hex).unwrap_or_default(),
+                auth: self.secret,
             });
         }
         match (&c.relay, &ch.live_group) {
@@ -694,17 +737,18 @@ impl App {
                 relay: r.clone(),
                 group: g.clone(),
                 voice: c.voice,
+                auth: self.secret,
             }),
             _ => None,
         }
     }
 
     /// Grupos NIP-29 (kind 39000) → comunidades prontas (roda no worker).
-    fn op_fetch_groups(relay: String) -> OpResult {
+    fn op_fetch_groups(relay: String, auth: Option<[u8; 32]>) -> OpResult {
         if relay.is_empty() {
             return OpResult::Failed("sem relay configurado".to_string());
         }
-        match nostr::fetch_groups(&relay) {
+        match nostr::fetch_groups(&relay, auth) {
             Ok(groups) => {
                 let list = groups
                     .into_iter()
@@ -746,13 +790,15 @@ impl App {
                 relay,
                 group,
                 voice,
+                auth,
             } => {
+                // Presença: None = consulta falhou (≠ sala vazia).
                 let presence = if voice {
-                    nostr::fetch_participants(&relay, &group).unwrap_or_default()
+                    nostr::fetch_participants(&relay, &group, auth).ok()
                 } else {
-                    Vec::new()
+                    Some(Vec::new())
                 };
-                match nostr::fetch_messages(&relay, &group, 50) {
+                match nostr::fetch_messages(&relay, &group, 50, auth) {
                     Ok(msgs) => OpResult::Chat {
                         ci,
                         chi,
@@ -760,12 +806,17 @@ impl App {
                             .into_iter()
                             .map(|m| Message {
                                 author: m.author,
-                                content: m.content,
+                                content: match m.kind {
+                                    7 => format!("👍 {}", m.content),
+                                    1111 => format!("↳ {}", m.content),
+                                    _ => m.content,
+                                },
                                 time: m.time,
                                 mine: false,
                             })
                             .collect(),
-                        presence,
+                        presence: presence.clone().unwrap_or_default(),
+                        presence_known: presence.is_some(),
                     },
                     Err(e) => OpResult::Failed(format!("falha msgs: {e:#}")),
                 }
@@ -777,9 +828,10 @@ impl App {
                 ch_id,
                 epoch,
                 my_pk,
+                auth,
             } => {
                 use crate::concord::{invite as inv, stream};
-                let wraps = match inv::fetch_wraps(&relays, &pk, 50) {
+                let wraps = match inv::fetch_wraps(&relays, &pk, 50, auth) {
                     Ok(w) => w,
                     Err(e) => return OpResult::Failed(format!("wraps: {e:#}")),
                 };
@@ -811,6 +863,7 @@ impl App {
                     chi,
                     messages: msgs.into_iter().map(|(_, m)| m).collect(),
                     presence: Vec::new(),
+                    presence_known: false,
                 }
             }
         }
@@ -871,7 +924,7 @@ impl App {
         self.authed = true;
         self.screen = Screen::Server;
         self.login_error = None;
-        self.login_input.clear();
+        Self::wipe_string(&mut self.login_input);
         self.status = format!(
             "chave ok ({}) — escrita live via {}",
             self.npub,
@@ -892,7 +945,7 @@ impl App {
     }
 
     /// Invite Concord no worker: parse → bundle → control → comunidade pronta.
-    fn op_invite(link: String) -> OpResult {
+    fn op_invite(link: String, auth: Option<[u8; 32]>) -> OpResult {
         use crate::concord::invite as inv;
         let p = match inv::parse_invite_link(&link) {
             Some(p) => p,
@@ -902,7 +955,7 @@ impl App {
                 )
             }
         };
-        let ev = match inv::fetch_bundle_event(&p.relays, &p.link_signer) {
+        let ev = match inv::fetch_bundle_event(&p.relays, &p.link_signer, auth) {
             Ok(ev) => ev,
             Err(e) => return OpResult::Failed(format!("bundle não achado: {e:#}")),
         };
@@ -922,7 +975,7 @@ impl App {
             .and_then(|v| v.try_into().ok());
         let folded: Vec<control::ControlChannel> = match (root, cid) {
             (Some(r), Some(c)) => {
-                control::fetch_control_channels(&b.relays, &r, &hex::encode(c), b.root_epoch)
+                control::fetch_control_channels(&b.relays, &r, &hex::encode(c), b.root_epoch, auth)
                     .unwrap_or_default()
             }
             _ => Vec::new(),

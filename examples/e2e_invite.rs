@@ -13,9 +13,8 @@ fn main() -> anyhow::Result<()> {
     let p = inv::parse_invite_link(&url).expect("link parse");
     println!("signer: {}", p.link_signer);
     println!("relays: {:?}", p.relays);
-    println!("token: {}", hex::encode(p.token));
 
-    let ev = inv::fetch_bundle_event(&p.relays, &p.link_signer)?;
+    let ev = inv::fetch_bundle_event(&p.relays, &p.link_signer, None)?;
     println!(
         "bundle evt: kind={} created_at={} id={}",
         ev["kind"], ev["created_at"], ev["id"]
@@ -32,6 +31,7 @@ fn main() -> anyhow::Result<()> {
             &root,
             &b.community_id,
             b.root_epoch,
+            None,
         ) {
             Ok(cc) => {
                 println!("control: {} canais", cc.len());
@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
                         want,
                         armada_tui::models::short(&g.pk, 8).as_str()
                     );
-                    match inv::fetch_wraps(&b.relays, &g.pk, 50) {
+                    match inv::fetch_wraps(&b.relays, &g.pk, 50, None) {
                         Ok(wraps) => {
                             println!("wraps: {}", wraps.len());
                             let mut msgs = vec![];
@@ -117,7 +117,7 @@ fn main() -> anyhow::Result<()> {
             secp256k1::Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&sk)?);
         let (xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
         let pk = format!("{xonly}");
-        let wraps = inv::fetch_wraps(&b.relays, &pk, 50)?;
+        let wraps = inv::fetch_wraps(&b.relays, &pk, 50, None)?;
         println!("wraps: {}", wraps.len());
         let mut msgs = vec![];
         for w in &wraps {

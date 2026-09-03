@@ -1,13 +1,10 @@
-// Uso: NSEC=nsec1... node login.cjs
+// Uso: NSEC=... node login.cjs (sem NSEC gera throwaway)
 const { chromium } = require('playwright-core');
-const NSEC = process.env.NSEC;
-if (!NSEC) { console.error('NSEC vazio'); process.exit(1); }
+const { launchOpts, ensureNsec } = require('./lib.cjs');
+const NSEC = ensureNsec();
 
 (async () => {
-  const browser = await chromium.launch({
-    executablePath: '/usr/bin/google-chrome-stable',
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
-  });
+  const browser = await chromium.launch(launchOpts());
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   await page.goto('https://armada.buzz', { waitUntil: 'domcontentloaded', timeout: 45000 });
   await page.waitForTimeout(6000);

@@ -207,7 +207,11 @@ pub fn invite_bundle_key(token: &[u8]) -> [u8; 32] {
 /// Busca o bundle 33301 do signer em TODOS os relays e fica com o mais
 /// recente (relays dessincronizados: o primeiro a responder nem sempre
 /// tem a versão atual).
-pub fn fetch_bundle_event(relays: &[String], signer: &str) -> anyhow::Result<serde_json::Value> {
+pub fn fetch_bundle_event(
+    relays: &[String],
+    signer: &str,
+    auth: Option<[u8; 32]>,
+) -> anyhow::Result<serde_json::Value> {
     let filter = serde_json::json!({"kinds": [KIND_INVITE_BUNDLE], "authors": [signer], "#d": [""], "limit": 5});
     let relays = crate::netpolicy::filter_relays(relays);
     if relays.is_empty() {
@@ -221,6 +225,7 @@ pub fn fetch_bundle_event(relays: &[String], signer: &str) -> anyhow::Result<ser
             "armada-invite",
             filter.clone(),
             std::time::Duration::from_secs(12),
+            auth,
         ) {
             Ok(evs) => {
                 for e in evs {
@@ -366,6 +371,7 @@ pub fn fetch_wraps(
     relays: &[String],
     stream_pk: &str,
     limit: u32,
+    auth: Option<[u8; 32]>,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let filter =
         serde_json::json!({"kinds": [1059, 21059], "authors": [stream_pk], "limit": limit});
@@ -382,6 +388,7 @@ pub fn fetch_wraps(
             "armada-wraps",
             filter.clone(),
             std::time::Duration::from_secs(12),
+            auth,
         ) {
             Ok(evs) => {
                 for e in evs {

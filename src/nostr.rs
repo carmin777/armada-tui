@@ -60,6 +60,7 @@ pub struct Nip29Group {
 
 #[derive(Debug, Clone)]
 pub struct ChatMsg {
+    pub kind: u64,
     pub author: String,
     pub content: String,
     pub time: String,
@@ -83,6 +84,7 @@ pub(crate) fn req_events(
     sub_id: &str,
     filter: serde_json::Value,
     timeout: Duration,
+    auth: Option<[u8; 32]>,
 ) -> anyhow::Result<Vec<NostrEvent>> {
     let (tx, rx) = mpsc::channel();
     let url = relay_url.to_string();
@@ -101,7 +103,11 @@ pub(crate) fn req_events(
                     .map_err(|_| anyhow::anyhow!("connect timeout (10s)"))??
             };
             arm_timeouts(&mut socket);
-            socket.send(tungstenite::Message::Text(req))?;
+            let send_req = |socket: &mut Ws| -> anyhow::Result<()> {
+                socket.send(tungstenite::Message::Text(req.clone()))?;
+                Ok(())
+            };
+            send_req(&mut socket)?;
             let mut events = Vec::new();
             let mut eose = false;
             let deadline = Instant::now() + timeout;
@@ -116,6 +122,26 @@ pub(crate) fn req_events(
                 match socket.read() {
                     Ok(tungstenite::Message::Text(txt)) => {
                         let v: serde_json::Value = serde_json::from_str(&txt)?;
+                        // NIP-42 no read: responde AUTH e reenvia o REQ.
+                        if v.get(0).and_then(|x| x.as_str()) == Some("AUTH") {
+                            if let Some(secret) = auth {
+                                let ch = v.get(1).and_then(|x| x.as_str()).unwrap_or("");
+                                let ev = sign_event(
+                                    &secret,
+                                    22242,
+                                    vec![
+                                        vec!["relay".to_string(), url.clone()],
+                                        vec!["challenge".to_string(), ch.to_string()],
+                                    ],
+                                    "",
+                                )?;
+                                socket.send(tungstenite::Message::Text(
+                                    serde_json::json!(["AUTH", ev]).to_string(),
+                                ))?;
+                                send_req(&mut socket)?;
+                            }
+                            continue;
+                        }
                         match v.get(0).and_then(|x| x.as_str()) {
                             Some("EVENT") => {
                                 if let Some(ev) = v.get(2) {
@@ -246,14 +272,35 @@ pub(crate) fn validate_value(ev: &serde_json::Value) -> anyhow::Result<()> {
     )
 }
 
-/// Lista grupos públicos (kind 39000) do relay.
-pub fn fetch_groups(relay_url: &str) -> anyhow::Result<Vec<Nip29Group>> {
+/// Lista grupos públicos (kind 39000) do relay. Sem tag `d` = descarta;
+/// duplicados por `d` ficam com o mais recente (não confia no relay).
+pub fn fetch_groups(relay_url: &str, auth: Option<[u8; 32]>) -> anyhow::Result<Vec<Nip29Group>> {
     crate::netpolicy::check_relay_url(relay_url)?;
     let filter = serde_json::json!({"kinds": [39000]});
-    let evs = req_events(relay_url, "armada-groups", filter, Duration::from_secs(15))?;
-    Ok(evs
-        .into_iter()
-        .filter(|e| e.kind == 39000)
+    let evs = req_events(
+        relay_url,
+        "armada-groups",
+        filter,
+        Duration::from_secs(15),
+        auth,
+    )?;
+    let mut by_id: std::collections::HashMap<String, NostrEvent> = std::collections::HashMap::new();
+    for e in evs.into_iter().filter(|e| e.kind == 39000) {
+        let Some(id) = e.tag("d").map(|s| s.to_string()) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        match by_id.get(&id) {
+            Some(old) if old.created_at >= e.created_at => {}
+            _ => {
+                by_id.insert(id, e);
+            }
+        }
+    }
+    Ok(by_id
+        .into_values()
         .map(|e| {
             let id = e.tag("d").unwrap_or("?").to_string();
             let name = e.tag("name").unwrap_or(&id).to_string();
@@ -269,16 +316,37 @@ pub fn fetch_groups(relay_url: &str) -> anyhow::Result<Vec<Nip29Group>> {
 }
 
 /// Últimas mensagens com tag `h = group_id` (kinds 1/7/9/11/1111), ordenadas.
-pub fn fetch_messages(relay_url: &str, group_id: &str, limit: u32) -> anyhow::Result<Vec<ChatMsg>> {
+/// Valida `#h` e deduplica por id localmente (relay pode ignorar o filtro).
+pub fn fetch_messages(
+    relay_url: &str,
+    group_id: &str,
+    limit: u32,
+    auth: Option<[u8; 32]>,
+) -> anyhow::Result<Vec<ChatMsg>> {
     crate::netpolicy::check_relay_url(relay_url)?;
     let filter =
         serde_json::json!({"kinds": [1, 7, 9, 11, 1111], "#h": [group_id], "limit": limit});
-    let mut evs = req_events(relay_url, "armada-msgs", filter, Duration::from_secs(15))?;
+    let mut evs = req_events(
+        relay_url,
+        "armada-msgs",
+        filter,
+        Duration::from_secs(15),
+        auth,
+    )?;
     evs.sort_by_key(|e| e.created_at);
     evs.retain(|e| matches!(e.kind, 1 | 7 | 9 | 11 | 1111));
+    // #h local + dedupe por id.
+    let mut seen = std::collections::HashSet::new();
+    evs.retain(|e| {
+        e.tags.iter().any(|t| {
+            t.first().map(|s| s == "h").unwrap_or(false)
+                && t.get(1).map(|s| s == group_id).unwrap_or(false)
+        }) && seen.insert(e.id.clone())
+    });
     Ok(evs
         .into_iter()
         .map(|e| ChatMsg {
+            kind: e.kind,
             author: short_pk(&e.pubkey),
             content: e.content,
             time: fmt_time(e.created_at),
@@ -296,10 +364,22 @@ pub fn parse_participants(ev: &NostrEvent) -> Vec<String> {
         .collect()
 }
 
-/// Lê presença 39004 do grupo no relay.
-pub fn fetch_participants(relay_url: &str, group_id: &str) -> anyhow::Result<Vec<String>> {
+/// Lê presença 39004 do grupo no relay (kind + tag d conferidos).
+pub fn fetch_participants(
+    relay_url: &str,
+    group_id: &str,
+    auth: Option<[u8; 32]>,
+) -> anyhow::Result<Vec<String>> {
+    crate::netpolicy::check_relay_url(relay_url)?;
     let filter = serde_json::json!({"kinds": [39004], "#d": [group_id], "limit": 5});
-    let mut evs = req_events(relay_url, "armada-voice", filter, Duration::from_secs(12))?;
+    let mut evs = req_events(
+        relay_url,
+        "armada-voice",
+        filter,
+        Duration::from_secs(12),
+        auth,
+    )?;
+    evs.retain(|e| e.kind == 39004 && e.tag("d").map(|d| d == group_id).unwrap_or(false));
     evs.sort_by_key(|e| e.created_at);
     Ok(evs
         .into_iter()
@@ -313,11 +393,19 @@ pub fn fetch_participants(relay_url: &str, group_id: &str) -> anyhow::Result<Vec
 // ---------------------------------------------------------------------------
 
 /// Chave do usuário em memória (nunca logada, nunca serializada).
+/// Drop zeroíza o segredo: clones em workers se limpam sozinhos.
 #[derive(Debug, Clone)]
 pub struct Keys {
     pub secret: [u8; 32],
     pub pubkey_hex: String,
     pub npub: String,
+}
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.secret.zeroize();
+    }
 }
 
 /// Aceita `nsec1…` (bech32) ou hex de 64 chars.
@@ -607,7 +695,8 @@ pub fn publish(
     }
 }
 
-/// Publica wrap Concord em todos os relays; basta 1 OK (retorna quantos).
+/// Publica wrap Concord em todos os relays EM PARALELO; basta 1 OK.
+/// Teto global 25s p/ não somar timeouts em sequência.
 pub fn publish_concord(
     relays: &[String],
     wrap: serde_json::Value,
@@ -617,16 +706,30 @@ pub fn publish_concord(
     if relays.is_empty() {
         anyhow::bail!("nenhum relay permitido na política");
     }
-    let mut oks = 0usize;
-    let mut last_err = anyhow::anyhow!("sem relays");
+    let (tx, rx) = mpsc::channel();
     for r in relays {
-        match publish(&r, keys, wrap.clone(), Duration::from_secs(20)) {
-            Ok(_) => oks += 1,
-            Err(e) => last_err = e,
+        let (tx, wrap, keys) = (tx.clone(), wrap.clone(), keys.cloned());
+        std::thread::spawn(move || {
+            let out = publish(&r, keys.as_ref(), wrap, Duration::from_secs(20));
+            let _ = tx.send(out.is_ok());
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut oks = 0usize;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(left) {
+            Ok(true) => oks += 1,
+            Ok(false) => {}
+            Err(_) => break,
         }
     }
     if oks == 0 {
-        return Err(anyhow::anyhow!("nenhum relay aceitou: {last_err:#}"));
+        anyhow::bail!("nenhum relay aceitou o wrap");
     }
     Ok(oks)
 }

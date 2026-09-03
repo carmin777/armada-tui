@@ -58,9 +58,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         // Operações de rede rodam em background; a UI nunca bloqueia.
         app.start_pending();
         app.poll_busy();
-        // Viewer de imagem: sai do alt-screen, renderiza via kitty, volta.
-        if let Some(url) = app.view_url.take() {
-            suspend_and_view(app, terminal, &url);
+        // Viewer de imagem: bytes já baixados no worker; só renderiza.
+        if let Some((url, bytes)) = app.view_image.take() {
+            suspend_and_view(app, terminal, &url, &bytes);
             continue;
         }
         if !event::poll(Duration::from_millis(100))? {
@@ -73,32 +73,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
     Ok(())
 }
 
-/// Sai do TUI, exibe PNG via Kitty graphics (ou a URL como fallback),
-/// espera Enter e volta.
+/// Sai do TUI e exibe PNG (bytes vindos do worker) via Kitty graphics.
 fn suspend_and_view(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     url: &str,
+    bytes: &[u8],
 ) {
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    println!("armada-tui · imagem: {url}");
-    if !kitty::supported() {
-        println!(
-            "(terminal sem Kitty graphics: TERM={:?}, sem KITTY_WINDOW_ID)",
-            std::env::var("TERM")
-        );
-        println!("abra a URL no navegador. Dica: rode dentro do kitty/wezterm/ghostty.");
-    } else {
-        match kitty::fetch_png(url) {
-            Ok(bytes) => {
-                println!("({} bytes, PNG — Enter volta)", bytes.len());
-                if let Err(e) = kitty::display_png(&bytes, 80) {
-                    println!("falha kitty: {e:#}");
-                }
-            }
-            Err(e) => println!("não deu p/ exibir: {e:#}\nURL: {url}"),
-        }
+    println!(
+        "armada-tui · imagem: {url} ({} bytes, PNG — Enter volta)",
+        bytes.len()
+    );
+    if let Err(e) = kitty::display_png(bytes, 80) {
+        println!("falha kitty: {e:#}");
     }
     println!("\n[Enter] volta pra TUI");
     let _ = io::stdin().read_line(&mut String::new());
@@ -177,7 +166,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 
     match code {
-        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('q') => {
+            // Sair também encerra a sessão (zeroíza segredos).
+            app.logout();
+            app.should_quit = true;
+        }
         KeyCode::Char('?') => app.goto(Screen::Help),
         KeyCode::Char('1') => app.goto(Screen::Welcome),
         KeyCode::Char('2') => app.goto(Screen::Server),
@@ -225,10 +218,8 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         KeyCode::Char('v') => {
             if matches!(app.screen, Screen::Server | Screen::Dms) {
-                match app.first_image_url() {
-                    Some(url) => app.view_url = Some(url),
-                    None => app.status = "nenhuma URL nas mensagens visíveis".to_string(),
-                }
+                app.status = "baixando imagem…".to_string();
+                app.pending = Some(app::PendingOp::Image);
             }
         }
         KeyCode::Char('J') if app.screen == Screen::Server => {

@@ -1,48 +1,43 @@
 //! Política central de rede: o que pode sair para onde.
 //!
-//! Dois contextos:
+//! Parsing via crate `url` (WHATWG — userinfo, query, IPv6 e portas tratados
+//! certo, sem parser manual). Dois contextos:
 //! - URLs de conteúdo (imagens de mensagens): entrada NÃO confiável → bloqueio
-//!   estrito (userinfo, hosts locais, IPv6 especial, redirects revalidados).
+//!   estrito + redirects revalidados (ver kitty.rs).
 //! - Relays wss (invites, NIP-29): só `wss://` + mesmos hosts bloqueados.
 //!   (Relay local p/ dev exige mudar o código de propósito.)
+//!
+//! Limitação honesta: sem pinning de IP no socket, DNS rebinding entre a
+//! checagem e o connect continua teoricamente possível; a janela é mínima
+//! (checagem imediatamente antes do uso, sem cache).
 
-/// Separa host de URL http(s) (sem userinfo, sem porta).
-fn http_host(url: &str) -> anyhow::Result<String> {
-    let lower = url.to_lowercase();
-    let after = if let Some(a) = lower.strip_prefix("https://") {
-        a
-    } else if let Some(a) = lower.strip_prefix("http://") {
-        a
-    } else {
-        anyhow::bail!("só http(s)");
-    };
-    let authority = after.split('/').next().unwrap_or("");
-    // userinfo "user@host" → pega o host real (anti `http://x@127.0.0.1`).
-    let hostport = authority.rsplit('@').next().unwrap_or("");
-    Ok(strip_port(hostport))
-}
+use std::net::{IpAddr, ToSocketAddrs};
 
-/// Tira :porta (cuidando de IPv6 com/sem colchetes).
-fn strip_port(hostport: &str) -> String {
-    if let Some(rest) = hostport.strip_prefix('[') {
-        return rest.split(']').next().unwrap_or("").to_string();
-    }
-    match hostport.rsplit_once(':') {
-        Some((left, port)) if !left.contains(':') && port.parse::<u16>().is_ok() => {
-            left.to_string()
+fn is_public_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => {
+            !(v.is_loopback()
+                || v.is_private()
+                || v.is_link_local()
+                || v.is_multicast()
+                || v.is_unspecified())
         }
-        _ => hostport.to_string(),
+        IpAddr::V6(v) => {
+            !(v.is_loopback()
+                || v.is_multicast()
+                || v.is_unspecified()
+                || v.is_unicast_link_local()
+                || (v.segments()[0] & 0xfe00) == 0xfc00)
+        }
     }
 }
 
-/// True = proibido (localhost, redes privadas, link-local, metadata cloud,
-/// pseudo-TLDs locais). Recebe host já sem porta/userinfo.
-pub fn host_blocked(host: &str) -> bool {
-    let h = host.to_lowercase();
+fn domain_blocked(d: &str) -> bool {
+    let h = d.to_lowercase();
     if h.is_empty() || h == "localhost" {
         return true;
     }
-    for suf in [
+    [
         ".local",
         ".internal",
         ".lan",
@@ -52,90 +47,72 @@ pub fn host_blocked(host: &str) -> bool {
         ".example",
         ".home",
         ".corp",
-    ] {
-        if h.ends_with(suf) {
-            return true;
-        }
-    }
-    // IPv6 literal: loopback, ULA, link-local.
-    if h.contains(':') {
-        return h == "::1" || h.starts_with("fc") || h.starts_with("fd") || h.starts_with("fe80:");
-    }
-    let parts: Vec<&str> = h.split('.').collect();
-    if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
-        let n: Vec<u8> = parts.iter().map(|p| p.parse().unwrap()).collect();
-        return n[0] == 127
-            || n[0] == 10
-            || (n[0] == 172 && (16..=31).contains(&n[1]))
-            || (n[0] == 192 && n[1] == 168)
-            || (n[0] == 169 && n[1] == 254);
-    }
-    false
+        ".arpa",
+    ]
+    .iter()
+    .any(|s| h.ends_with(s))
 }
 
-/// DNS: true se resolve E todos os IPs são não-públicos. Falha de DNS =
-/// false (fail-open p/ não quebrar rede instável; literais já cobertos acima).
-pub fn host_resolves_private(host: &str) -> bool {
-    use std::net::ToSocketAddrs;
-    let probe = format!("{host}:443");
-    let mut saw = false;
-    let mut all_private = true;
-    if let Ok(addrs) = probe.to_socket_addrs() {
-        for a in addrs {
-            saw = true;
-            let ip = a.ip();
-            let public = match ip {
-                std::net::IpAddr::V4(v) => {
-                    !(v.is_loopback()
-                        || v.is_private()
-                        || v.is_link_local()
-                        || v.is_multicast()
-                        || v.is_unspecified()
-                        || v.octets()[0] == 169 && v.octets()[1] == 254)
-                }
-                std::net::IpAddr::V6(v) => {
-                    !(v.is_loopback()
-                        || v.is_multicast()
-                        || v.is_unspecified()
-                        || (v.segments()[0] & 0xfe00) == 0xfc00
-                        || (v.segments()[0] & 0xffc0) == 0xfe80)
-                }
-            };
-            if public {
-                all_private = false;
+/// Checa host já extraído (domínio ou IP literal).
+fn check_host(host: &url::Host<&str>, port: u16) -> anyhow::Result<String> {
+    match host {
+        url::Host::Domain(d) => {
+            if domain_blocked(d) {
+                anyhow::bail!("domínio bloqueado ({d})");
             }
+            // Fail-closed: sem DNS ou qualquer IP não-público = recusa.
+            let mut saw = false;
+            let mut all_public = true;
+            match (d.to_string(), port).to_socket_addrs() {
+                Ok(addrs) => {
+                    for a in addrs {
+                        saw = true;
+                        all_public &= is_public_ip(&a.ip());
+                    }
+                }
+                Err(_) => anyhow::bail!("DNS falhou p/ {d}"),
+            }
+            if !saw || !all_public {
+                anyhow::bail!("host sem IP público ({d})");
+            }
+            Ok(d.to_string())
+        }
+        url::Host::Ipv4(v) => {
+            if !is_public_ip(&IpAddr::V4(*v)) {
+                anyhow::bail!("IP bloqueado ({v})");
+            }
+            Ok(v.to_string())
+        }
+        url::Host::Ipv6(v) => {
+            if !is_public_ip(&IpAddr::V6(*v)) {
+                anyhow::bail!("IP bloqueado ({v})");
+            }
+            Ok(v.to_string())
         }
     }
-    saw && all_private
 }
 
 /// Valida URL de conteúdo. Retorna o host.
 pub fn check_http_url(url: &str) -> anyhow::Result<String> {
-    let host = http_host(url)?;
-    if host_blocked(&host) {
-        anyhow::bail!("host bloqueado ({host})");
+    let u = url::Url::parse(url).map_err(|_| anyhow::anyhow!("URL inválida"))?;
+    match u.scheme() {
+        "http" | "https" => {}
+        _ => anyhow::bail!("só http(s)"),
     }
-    if host_resolves_private(&host) {
-        anyhow::bail!("host resolve p/ IP privado ({host})");
-    }
-    Ok(host)
+    let host = u.host().ok_or_else(|| anyhow::anyhow!("sem host"))?;
+    let port = u.port_or_known_default().unwrap_or(443);
+    check_host(&host, port)
 }
 
 /// Valida relay: `wss://` + host liberado (+ DNS).
 pub fn check_relay_url(url: &str) -> anyhow::Result<String> {
-    if !url.to_lowercase().starts_with("wss://") {
-        anyhow::bail!("relay precisa ser wss:// ({url})");
+    let u = url::Url::parse(url).map_err(|_| anyhow::anyhow!("relay inválido"))?;
+    if u.scheme() != "wss" {
+        anyhow::bail!("relay precisa ser wss://");
     }
-    let after = url.split("://").nth(1).unwrap_or("");
-    let authority = after.split('/').next().unwrap_or("");
-    let host = strip_port(authority.rsplit('@').next().unwrap_or(""));
-    if host_blocked(&host) {
-        anyhow::bail!("relay bloqueado ({host})");
-    }
-    if host_resolves_private(&host) {
-        anyhow::bail!("relay resolve p/ IP privado ({host})");
-    }
-    Ok(host)
+    let host = u.host().ok_or_else(|| anyhow::anyhow!("sem host"))?;
+    let port = u.port_or_known_default().unwrap_or(443);
+    check_host(&host, port)
 }
 
 /// Filtra lista de relays pela política (bundle/invite: pula bloqueados).
@@ -153,9 +130,11 @@ mod tests {
 
     #[test]
     fn bloqueios() {
+        // Parser WHATWG resolve userinfo/query/fragment sozinho.
         for u in [
             "http://x@127.0.0.1/a.png",
             "http://user:pass@10.0.0.1/x",
+            "https://127.0.0.1?x",
             "https://localhost:8080/x",
             "https://[::1]/x",
             "https://[fc00::1]/x",
@@ -168,10 +147,15 @@ mod tests {
         ] {
             assert!(check_http_url(u).is_err(), "{u} deveria bloquear");
         }
+        assert!(check_relay_url("wss://127.0.0.1:7000").is_err());
+        assert!(check_relay_url("ws://relay.ditto.pub").is_err());
+        assert!(check_relay_url("http://x@evil.com").is_err());
+    }
+
+    #[test]
+    fn legitimos_passam() {
+        // Exige DNS funcionando (CI tem); fail-closed de propósito.
         assert!(check_http_url("https://blossom.primal.net/x.png").is_ok());
         assert!(check_relay_url("wss://relay.ditto.pub").is_ok());
-        assert!(check_relay_url("ws://relay.ditto.pub").is_err());
-        assert!(check_relay_url("wss://127.0.0.1:7000").is_err());
-        assert!(check_relay_url("http://x@evil.com").is_err());
     }
 }

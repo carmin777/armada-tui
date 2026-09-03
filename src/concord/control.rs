@@ -101,12 +101,13 @@ pub fn fetch_control_channels(
     root: &[u8; 32],
     community_id: &str,
     epoch: u64,
+    auth: Option<[u8; 32]>,
 ) -> anyhow::Result<Vec<ControlChannel>> {
     let cid: [u8; 32] = hex::decode(community_id)?
         .try_into()
         .map_err(|_| anyhow::anyhow!("community_id inválido"))?;
     let g = derive::group_key(derive::label::CONTROL, root, &cid, Some(epoch));
-    let wraps = fetch_wraps(relays, &g.pk, 200)?;
+    let wraps = fetch_wraps(relays, &g.pk, 200, auth)?;
     Ok(fold_channel_wraps(&wraps, &g.sk, &g.pk))
 }
 

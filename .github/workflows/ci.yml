@@ -21,3 +21,7 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: test
         run: cargo test --locked
+      - name: e2e scripts (sintaxe; browser real é manual)
+        run: |
+          npm ci --prefix e2e --no-audit --no-fund
+          npm test --prefix e2e

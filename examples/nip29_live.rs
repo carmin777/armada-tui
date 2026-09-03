@@ -9,14 +9,14 @@ fn main() -> anyhow::Result<()> {
     let cmd = std::env::args().nth(2).expect("cmd");
     match cmd.as_str() {
         "groups" => {
-            for g in nostr::fetch_groups(&relay)? {
+            for g in nostr::fetch_groups(&relay, None)? {
                 let about: String = g.about.chars().take(60).collect();
                 println!("{} [{}] {about}", g.id, g.name);
             }
         }
         "msgs" => {
             let group = std::env::args().nth(3).expect("grupo");
-            for m in nostr::fetch_messages(&relay, &group, 20)? {
+            for m in nostr::fetch_messages(&relay, &group, 20, None)? {
                 println!(
                     "[{}] {}: {}",
                     m.time,
@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
         }
         "voice" => {
             let group = std::env::args().nth(3).expect("grupo");
-            let ps = nostr::fetch_participants(&relay, &group)?;
+            let ps = nostr::fetch_participants(&relay, &group, None)?;
             println!("🔊 {} na chamada em {group}", ps.len());
             for p in ps {
                 println!("  {p}");
