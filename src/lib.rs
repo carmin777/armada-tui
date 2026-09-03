@@ -1,5 +1,6 @@
 pub mod app;
 pub mod concord;
+pub mod dm;
 pub mod kitty;
 pub mod mock;
 pub mod models;

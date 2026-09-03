@@ -209,6 +209,9 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             if matches!(app.screen, Screen::Server | Screen::Discover) {
                 app.status = "buscando grupos NIP-29…".to_string();
                 app.pending = Some(app::PendingOp::Groups);
+            } else if app.screen == Screen::Dms {
+                app.status = "buscando DMs…".to_string();
+                app.pending = Some(app::PendingOp::DmList);
             }
         }
         KeyCode::Char('m') => {

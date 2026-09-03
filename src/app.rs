@@ -61,6 +61,8 @@ pub enum PendingOp {
     Join,
     Invite,
     Image,
+    DmList,
+    DmSend,
 }
 
 /// Resultado que o worker devolve para a thread da UI aplicar.
@@ -84,6 +86,11 @@ pub enum OpResult {
     Image {
         url: String,
         bytes: Vec<u8>,
+    },
+    DmThreads(Vec<DmThread>),
+    DmSent {
+        peer: String,
+        text: String,
     },
     Failed(String),
 }
@@ -397,6 +404,12 @@ impl App {
             mine: true,
         };
         if self.screen == Screen::Dms {
+            // Com nsec: DM E2EE de verdade. Sem: mock local (thread atual).
+            if self.secret.is_some() && self.dms.get(self.sel_dm).is_some() {
+                self.status = "enviando DM…".to_string();
+                self.pending = Some(PendingOp::DmSend);
+                return;
+            }
             if let Some(d) = self.dms.get_mut(self.sel_dm) {
                 d.messages.push(m);
                 d.preview = d
@@ -407,7 +420,7 @@ impl App {
             }
             self.input.clear();
             self.input_mode = false;
-            self.status = "DM mock local (NIP-17/44 no roadmap)".to_string();
+            self.status = "DM mock local (sem nsec)".to_string();
             return;
         }
         // Canal live (NIP-29 ou Concord com chave) + nsec → publica via pending.
@@ -566,6 +579,53 @@ impl App {
                     return;
                 }
             },
+            PendingOp::DmList => match self.secret.clone() {
+                Some(secret) => {
+                    let relays = self.relays.app_relays.clone();
+                    let auth = Some(secret.clone());
+                    let cancel = self.cancel.clone();
+                    (
+                        "DMs…".to_string(),
+                        Box::new(move || Self::op_dm_list(secret, relays, auth, cancel)),
+                    )
+                }
+                None => {
+                    self.status = "DMs exigem login com nsec".to_string();
+                    return;
+                }
+            },
+            PendingOp::DmSend => {
+                let text = self.input.trim().to_string();
+                if text.is_empty() {
+                    self.input_mode = false;
+                    return;
+                }
+                let peer = match self.dms.get(self.sel_dm) {
+                    Some(d) => d.peer.clone(),
+                    None => {
+                        self.status = "sem conversa selecionada (r p/ buscar)".to_string();
+                        return;
+                    }
+                };
+                match self.secret.clone() {
+                    Some(secret) => {
+                        let relays = self.relays.app_relays.clone();
+                        let auth = Some(secret.clone());
+                        let cancel = self.cancel.clone();
+                        self.input_mode = false;
+                        (
+                            "enviando DM…".to_string(),
+                            Box::new(move || {
+                                Self::op_dm_send(secret, peer, text, relays, auth, cancel)
+                            }),
+                        )
+                    }
+                    None => {
+                        self.status = "DMs exigem login com nsec".to_string();
+                        return;
+                    }
+                }
+            }
         };
         self.status = format!("ocupado: {label}");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -669,6 +729,34 @@ impl App {
                 }
                 self.view_image = Some((url, bytes));
             }
+            OpResult::DmThreads(threads) => {
+                let n = threads.len();
+                self.dms = threads;
+                if self.sel_dm >= self.dms.len() {
+                    self.sel_dm = 0;
+                }
+                self.status = format!("{n} conversas E2EE");
+            }
+            OpResult::DmSent { peer, text } => {
+                self.input.clear();
+                self.input_mode = false;
+                if let Some(d) = self.dms.iter_mut().find(|d| d.peer == peer) {
+                    d.messages.push(Message {
+                        author: "você".to_string(),
+                        content: text,
+                        time: "agora".to_string(),
+                        mine: true,
+                    });
+                    d.preview = d
+                        .messages
+                        .last()
+                        .map(|m| m.content.clone())
+                        .unwrap_or_default();
+                    self.status = "DM enviada".to_string();
+                } else {
+                    self.status = "DM enviada (thread sumiu?)".to_string();
+                }
+            }
             OpResult::Failed(e) => {
                 // P2-7: rascunho preservado — texto volta pro input p/ retry.
                 if !self.input.trim().is_empty() {
@@ -685,6 +773,107 @@ impl App {
             Ok(bytes) => OpResult::Image { url, bytes },
             Err(e) => OpResult::Failed(format!("imagem: {e:#}")),
         }
+    }
+
+    /// Threads DM no worker: busca wraps #p eu, abre, agrupa por peer.
+    fn op_dm_list(
+        secret: zeroize::Zeroizing<[u8; 32]>,
+        relays: Vec<String>,
+        auth: Option<zeroize::Zeroizing<[u8; 32]>>,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> OpResult {
+        use std::collections::HashMap;
+        let raw: [u8; 32] = *secret;
+        let my_pk = match Self::dm_my_pk(&raw) {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed(format!("chave: {e:#}")),
+        };
+        let msgs = match crate::dm::fetch_threads(&relays, &raw, auth, cancel) {
+            Ok(m) => m,
+            Err(e) => return OpResult::Failed(format!("DMs: {e:#}")),
+        };
+        let mut threads: HashMap<String, DmThread> = HashMap::new();
+        for m in msgs {
+            let t = threads.entry(m.peer.clone()).or_insert_with(|| DmThread {
+                peer: m.peer.clone(),
+                preview: String::new(),
+                messages: Vec::new(),
+            });
+            t.messages.push(Message {
+                author: if m.author == my_pk {
+                    "você".to_string()
+                } else {
+                    crate::models::short(&m.author, 8)
+                },
+                content: m.content.clone(),
+                time: chrono::DateTime::from_timestamp(m.created_at, 0)
+                    .map(|d| d.format("%d/%m %H:%M").to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                mine: m.author == my_pk,
+            });
+        }
+        let mut out: Vec<DmThread> = threads.into_values().collect();
+        for t in &mut out {
+            t.preview = t
+                .messages
+                .last()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+        }
+        out.sort_by(|a, b| b.messages.len().cmp(&a.messages.len()));
+        OpResult::DmThreads(out)
+    }
+
+    /// Envia DM no worker: wrap p/ peer + wrap p/ si, nos relays do 10050.
+    fn op_dm_send(
+        secret: zeroize::Zeroizing<[u8; 32]>,
+        peer: String,
+        text: String,
+        relays: Vec<String>,
+        auth: Option<zeroize::Zeroizing<[u8; 32]>>,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> OpResult {
+        let raw: [u8; 32] = *secret;
+        let now = chrono::Utc::now().timestamp();
+        let w_peer = match crate::dm::build_wrap(&text, &peer, &raw, now) {
+            Ok(w) => w,
+            Err(e) => return OpResult::Failed(format!("selar DM: {e:#}")),
+        };
+        let my_pk = match Self::dm_my_pk(&raw) {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed(format!("chave: {e:#}")),
+        };
+        let w_self = match crate::dm::build_wrap(&text, &my_pk, &raw, now) {
+            Ok(w) => w,
+            Err(e) => return OpResult::Failed(format!("selar cópia: {e:#}")),
+        };
+        let mut targets = crate::dm::fetch_dm_relays(&relays, &peer, auth.clone(), cancel.clone());
+        if targets.is_empty() {
+            targets = relays.clone();
+        }
+        // Wrap do peer precisa de 1 OK; cópia própria é best-effort (eco local cobre).
+        // Chaves p/ NIP-42 se o relay pedir auth (wraps já são auto-suficientes).
+        let keys = crate::nostr::Keys {
+            secret: zeroize::Zeroizing::new(raw),
+            pubkey_hex: my_pk,
+            npub: String::new(),
+        };
+        match crate::nostr::publish_concord(&targets, w_peer, Some(&keys), cancel.clone()) {
+            Ok(_) => {
+                let _ = crate::nostr::publish_concord(&relays, w_self, Some(&keys), cancel);
+                OpResult::DmSent { peer, text }
+            }
+            Err(e) => OpResult::Failed(format!("DM rejeitada: {e:#}")),
+        }
+    }
+
+    /// x-only pubkey de um segredo (helper p/ workers de DM).
+    fn dm_my_pk(secret: &[u8; 32]) -> anyhow::Result<String> {
+        let secp = secp256k1::Secp256k1::new();
+        let kp =
+            secp256k1::Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(secret)?);
+        let (x, _) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
+        Ok(format!("{x}"))
     }
 
     /// Snapshot p/ envio Concord (relays + chave da stream do canal).
