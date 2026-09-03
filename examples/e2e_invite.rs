@@ -65,7 +65,12 @@ fn main() -> anyhow::Result<()> {
                             &author.secret,
                             &g.sk,
                         )?;
-                        let n = nostr::publish_concord(&b.relays, wrap, Some(&author), nostr::never_cancel())?;
+                        let n = nostr::publish_concord(
+                            &b.relays,
+                            wrap,
+                            Some(&author),
+                            nostr::never_cancel(),
+                        )?;
                         println!(
                             "ENVIADO a {n} relays como {}: {text}",
                             &author.pubkey_hex[..8]
