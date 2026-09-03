@@ -187,7 +187,7 @@ pub fn parse_secret(input: &str) -> anyhow::Result<Keys> {
     let pubkey_hex = format!("{xonly}");
     let npub = bech32::encode(
         "npub",
-        xonly.serialize()[..].to_base32(),
+        xonly.serialize().to_vec().to_base32(),
         bech32::Variant::Bech32,
     )?;
     Ok(Keys {
