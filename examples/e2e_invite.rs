@@ -38,6 +38,47 @@ fn main() -> anyhow::Result<()> {
                 for c in &cc {
                     println!("  #{} priv={}", c.name, c.is_private);
                 }
+                // Lê um canal público (2º arg, default general): deriva do root.
+                let want = std::env::args()
+                    .nth(2)
+                    .unwrap_or_else(|| "general".to_string());
+                if let Some(ch) = cc.iter().find(|c| c.name == want && !c.is_private) {
+                    use armada_tui::concord::derive;
+                    let id: [u8; 32] = h32(&ch.id)?;
+                    let g =
+                        derive::group_key(derive::label::CHANNEL, &root, &id, Some(b.root_epoch));
+                    println!("lendo #{} (stream {}…)…", want, &g.pk[..8]);
+                    match inv::fetch_wraps(&b.relays, &g.pk, 50) {
+                        Ok(wraps) => {
+                            println!("wraps: {}", wraps.len());
+                            let mut msgs = vec![];
+                            for w in &wraps {
+                                match stream::open_wrap(w, &g.sk, &g.pk, &ch.id, b.root_epoch) {
+                                    Ok(r) => {
+                                        let t = chrono::DateTime::from_timestamp_millis(r.ms)
+                                            .map(|d| d.format("%d/%m %H:%M").to_string())
+                                            .unwrap_or_default();
+                                        msgs.push((
+                                            r.ms,
+                                            format!(
+                                                "[{t}] kind={} {}: {}",
+                                                r.kind,
+                                                &r.author[..8],
+                                                r.content
+                                            ),
+                                        ));
+                                    }
+                                    Err(e) => println!("(wrap ignorado: {e:#})"),
+                                }
+                            }
+                            msgs.sort();
+                            for (_, m) in msgs {
+                                println!("{m}");
+                            }
+                        }
+                        Err(e) => println!("wraps: {e:#}"),
+                    }
+                }
             }
             Err(e) => println!("control: {e:#}"),
         }
