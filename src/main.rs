@@ -231,17 +231,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 }
             }
         }
-        KeyCode::Char('J') => {
-            if app.screen == Screen::Server {
-                app.status = "enviando join 9021…".to_string();
-                app.pending = Some(app::PendingOp::Join);
-            }
+        KeyCode::Char('J') if app.screen == Screen::Server => {
+            app.status = "enviando join 9021…".to_string();
+            app.pending = Some(app::PendingOp::Join);
         }
-        KeyCode::Char('I') => {
-            if app.screen == Screen::Server {
-                app.invite_mode = true;
-                app.invite_input.clear();
-            }
+        KeyCode::Char('I') if app.screen == Screen::Server => {
+            app.invite_mode = true;
+            app.invite_input.clear();
         }
         _ => {}
     }
