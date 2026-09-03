@@ -112,8 +112,6 @@ pub fn display_png(png: &[u8], cols: u32) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn politica_central_cobre_viewer() {
         use crate::netpolicy;
