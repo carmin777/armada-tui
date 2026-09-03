@@ -79,7 +79,7 @@ fn calc_padded_len(unpadded_len: u64) -> u64 {
 
 fn pad(plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
     let n = plaintext.len() as u64;
-    if n < 1 || n > 0xffff_ffff {
+    if !(1..=0xffff_ffff).contains(&n) {
         anyhow::bail!("plaintext fora do limite 1..2^32-1");
     }
     let mut out = Vec::new();

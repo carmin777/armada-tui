@@ -140,7 +140,7 @@ pub fn decode_naddr_signer(naddr: &str) -> anyhow::Result<String> {
     if kind != Some(KIND_INVITE_BUNDLE as u32) {
         anyhow::bail!("naddr não é coordenada de invite");
     }
-    if identifier.as_deref().unwrap_or_default().is_empty() == false {
+    if !identifier.as_deref().unwrap_or_default().is_empty() {
         anyhow::bail!("naddr com identifier inesperado");
     }
     let a = author.ok_or_else(|| anyhow::anyhow!("naddr sem autor"))?;
@@ -166,10 +166,6 @@ pub fn parse_invite_link(input: &str) -> Option<ParsedInvite> {
         } else {
             Some((head.to_string(), rest.to_string()))
         }
-    } else if let Some(pos) = t.find("/invite/") {
-        // URL sem fragmento → sem segredo, inútil.
-        let _ = pos;
-        return None;
     } else {
         return None;
     }?;

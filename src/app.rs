@@ -133,6 +133,12 @@ pub struct App {
     pub should_quit: bool,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         Self {
@@ -291,10 +297,8 @@ impl App {
                 self.msg_scroll = self.msg_scroll.saturating_sub(1);
             }
         }
-        if self.screen == Screen::Dms && self.focus != Focus::Messages {
-            if self.sel_dm > 0 {
-                self.sel_dm -= 1;
-            }
+        if self.screen == Screen::Dms && self.focus != Focus::Messages && self.sel_dm > 0 {
+            self.sel_dm -= 1;
         }
     }
 
@@ -321,10 +325,11 @@ impl App {
                 self.msg_scroll = self.msg_scroll.saturating_add(1);
             }
         }
-        if self.screen == Screen::Dms && self.focus != Focus::Messages {
-            if self.sel_dm + 1 < self.dms.len() {
-                self.sel_dm += 1;
-            }
+        if self.screen == Screen::Dms
+            && self.focus != Focus::Messages
+            && self.sel_dm + 1 < self.dms.len()
+        {
+            self.sel_dm += 1;
         }
     }
 
@@ -657,31 +662,28 @@ impl App {
                     Err(e) => return OpResult::Failed(format!("wraps: {e:#}")),
                 };
                 let mut msgs: Vec<(i64, Message)> = Vec::new();
-                let mut fails = 0usize;
                 for w in &wraps {
-                    match stream::open_wrap(w, &sk, &pk, &ch_id, epoch) {
-                        Ok(r) if r.kind == 9 => msgs.push((
-                            r.ms,
-                            Message {
-                                author: if r.author == my_pk {
-                                    "você".to_string()
-                                } else {
-                                    crate::models::short(&r.author, 8)
+                    if let Ok(r) = stream::open_wrap(w, &sk, &pk, &ch_id, epoch) {
+                        if r.kind == 9 {
+                            msgs.push((
+                                r.ms,
+                                Message {
+                                    author: if r.author == my_pk {
+                                        "você".to_string()
+                                    } else {
+                                        crate::models::short(&r.author, 8)
+                                    },
+                                    content: r.content,
+                                    time: chrono::DateTime::from_timestamp_millis(r.ms)
+                                        .map(|d| d.format("%d/%m %H:%M").to_string())
+                                        .unwrap_or_else(|| "?".to_string()),
+                                    mine: r.author == my_pk,
                                 },
-                                content: r.content,
-                                time: chrono::DateTime::from_timestamp_millis(r.ms)
-                                    .map(|d| d.format("%d/%m %H:%M").to_string())
-                                    .unwrap_or_else(|| "?".to_string()),
-                                mine: r.author == my_pk,
-                            },
-                        )),
-                        Ok(_) => {}
-                        Err(_) => fails += 1,
+                            ));
+                        }
                     }
                 }
                 msgs.sort_by_key(|(ms, _)| *ms);
-                let n = msgs.len();
-                let _ = fails;
                 OpResult::Chat {
                     ci,
                     chi,

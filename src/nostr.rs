@@ -1,8 +1,10 @@
 //! Nostr mínimo p/ fase 1: leitura pública NIP-29 via WebSocket.
 //!
 //! Sem dependência de SDK pesado: `tungstenite` sync + thread com timeout.
+//!
 //! - Grupos:  `["REQ", sub, {"kinds":[39000]}]` → metadados (d/name/about/picture)
 //! - Mensagens: `["REQ", sub, {"kinds":[1,7,9,11,1111], "#h":[group-id], "limit":N}]`
+//!
 //! Grupos privados (NIP-42 auth) e escrita/E2EE ficam p/ fases seguintes.
 
 use serde::Deserialize;
@@ -418,17 +420,17 @@ pub fn publish(
                                 // NIP-42: depois de autenticar, reenvia o EVENT.
                                 send_event(&mut socket)?;
                             }
-                            Some("OK") => {
-                                if v.get(1).and_then(|x| x.as_str()) == Some(id.as_str()) {
-                                    let ok = v.get(2).and_then(|x| x.as_bool()).unwrap_or(false);
-                                    let msg =
-                                        v.get(3).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                                    if ok {
-                                        let _ = socket.close(None);
-                                        return Ok(if msg.is_empty() { id } else { msg });
-                                    }
-                                    anyhow::bail!("relay rejeitou: {msg}");
+                            Some("OK")
+                                if v.get(1).and_then(|x| x.as_str()) == Some(id.as_str()) =>
+                            {
+                                let ok = v.get(2).and_then(|x| x.as_bool()).unwrap_or(false);
+                                let msg =
+                                    v.get(3).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                if ok {
+                                    let _ = socket.close(None);
+                                    return Ok(if msg.is_empty() { id } else { msg });
                                 }
+                                anyhow::bail!("relay rejeitou: {msg}");
                             }
                             _ => {}
                         }
