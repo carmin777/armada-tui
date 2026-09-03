@@ -820,7 +820,7 @@ impl App {
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
         }
-        out.sort_by(|a, b| b.messages.len().cmp(&a.messages.len()));
+        out.sort_by_key(|a| std::cmp::Reverse(a.messages.len()));
         OpResult::DmThreads(out)
     }
 

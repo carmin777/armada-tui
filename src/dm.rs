@@ -71,7 +71,7 @@ pub fn build_wrap(
     let wconv = nip44::conversation_key(&eph, peer_hex)?;
     let wrap_content = nip44::encrypt_random(&wconv, serde_json::to_string(&seal)?.as_bytes())?;
     let wrap_at = random_past_secs(created_at, 172_800)?;
-    let mut wrap = sign_event_with(
+    let wrap = sign_event_with(
         &eph,
         KIND_WRAP,
         vec![vec!["p".to_string(), peer_hex.to_string()]],
@@ -212,7 +212,7 @@ pub fn fetch_threads(
     let mut all = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for r in crate::netpolicy::filter_relays(relays) {
-        match crate::nostr::req_events(
+        if let Ok(evs) = crate::nostr::req_events(
             &r,
             "armada-dms",
             filter.clone(),
@@ -220,21 +220,18 @@ pub fn fetch_threads(
             auth.clone(),
             cancel.clone(),
         ) {
-            Ok(evs) => {
-                for e in evs {
-                    let v = serde_json::json!({
-                        "id": e.id, "pubkey": e.pubkey, "created_at": e.created_at,
-                        "kind": e.kind, "tags": e.tags, "content": e.content, "sig": e.sig,
-                    });
-                    if seen.insert(e.id.clone()) {
-                        // Só DMs de verdade; resto (ex: outros gifts) ignora.
-                        if let Ok(m) = open_wrap(&v, my_secret) {
-                            all.push(m);
-                        }
+            for e in evs {
+                let v = serde_json::json!({
+                    "id": e.id, "pubkey": e.pubkey, "created_at": e.created_at,
+                    "kind": e.kind, "tags": e.tags, "content": e.content, "sig": e.sig,
+                });
+                if seen.insert(e.id.clone()) {
+                    // Só DMs de verdade; resto (ex: outros gifts) ignora.
+                    if let Ok(m) = open_wrap(&v, my_secret) {
+                        all.push(m);
                     }
                 }
             }
-            Err(_) => {}
         }
     }
     all.sort_by_key(|m| m.created_at);
