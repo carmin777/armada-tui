@@ -48,6 +48,8 @@ pub struct Community {
     pub relay: Option<String>,
     /// Todos os relays da comunidade (bundle Concord ou live NIP-29).
     pub relays: Vec<String>,
+    /// NIP-29 com tag `livekit` → tem sala de voz (V1: só presença).
+    pub voice: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

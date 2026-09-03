@@ -23,7 +23,7 @@
     {"id": "settings.relays.edit", "area": "settings", "status": "missing", "evidence": "none", "electron": "editar listas + --relay", "tui": "só --relay na CLI"},
     {"id": "media.kitty", "area": "mídia", "status": "partial", "evidence": "none", "electron": "imagens/GIF/vídeo inline", "tui": "tecla v: PNG via kitty (codificado, sem teste)"},
     {"id": "media.blossom", "area": "mídia", "status": "missing", "evidence": "none", "electron": "upload BUD-03", "tui": "—"},
-    {"id": "voice.presence", "area": "voz", "status": "missing", "evidence": "none", "electron": "quem está na chamada (39004)", "tui": "só aviso estático"},
+    {"id": "voice.presence", "area": "voz", "status": "partial", "evidence": "unit", "electron": "quem está na chamada (39004)", "tui": "🔊 nos grupos + presença no status (unit; live se achar chamada)"},
     {"id": "voice.signal", "area": "voz", "status": "missing", "evidence": "none", "electron": "token LiveKit via NIP-98 + presença 39004", "tui": "— (só ureq+nostr, barato de fazer)"},
     {"id": "voice.audio", "area": "voz", "status": "missing", "evidence": "none", "electron": "áudio LiveKit WebRTC E2E", "tui": "VIÁVEL: SDK livekit + cpal (precedente: discordo); custo alto"},
     {"id": "wallet.zaps", "area": "wallet", "status": "missing", "evidence": "none", "electron": "private zaps CORD + NIP-57", "tui": "—"},

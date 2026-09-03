@@ -39,6 +39,7 @@ pub fn mock_communities() -> Vec<Community> {
             unread: 3,
             relay: None,
             relays: Vec::new(),
+            voice: false,
             channels: vec![
                 Channel {
                     id: "general".to_string(),
@@ -109,6 +110,7 @@ pub fn mock_communities() -> Vec<Community> {
             unread: 0,
             relay: None,
             relays: Vec::new(),
+            voice: false,
             channels: vec![
                 Channel {
                     id: "ann".to_string(),

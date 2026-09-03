@@ -69,6 +69,7 @@ pub enum OpResult {
         ci: usize,
         chi: usize,
         messages: Vec<Message>,
+        presence: Vec<String>,
     },
     Sent {
         ci: usize,
@@ -101,6 +102,7 @@ pub enum MsgTarget {
     Nip29 {
         relay: String,
         group: String,
+        voice: bool,
     },
     Concord {
         relays: Vec<String>,
@@ -568,7 +570,12 @@ impl App {
                 self.communities.extend(list);
                 self.status = format!("{n} grupos live (m = msgs, v = imagem)");
             }
-            OpResult::Chat { ci, chi, messages } => {
+            OpResult::Chat {
+                ci,
+                chi,
+                messages,
+                presence,
+            } => {
                 let n = messages.len();
                 if let Some(comm) = self.communities.get_mut(ci) {
                     if let Some(ch) = comm.channels.get_mut(chi) {
@@ -576,7 +583,19 @@ impl App {
                     }
                 }
                 self.msg_scroll = 0;
-                self.status = format!("{n} msgs");
+                self.status = if presence.is_empty() {
+                    format!("{n} msgs")
+                } else {
+                    let who: Vec<String> = presence
+                        .iter()
+                        .map(|p| crate::models::short(p, 8))
+                        .collect();
+                    format!(
+                        "{n} msgs · 🔊 {} na chamada ({})",
+                        presence.len(),
+                        who.join(", ")
+                    )
+                };
             }
             OpResult::Sent { ci, chi, text, id } => {
                 self.input.clear();
@@ -674,6 +693,7 @@ impl App {
             (Some(r), Some(g)) => Some(MsgTarget::Nip29 {
                 relay: r.clone(),
                 group: g.clone(),
+                voice: c.voice,
             }),
             _ => None,
         }
@@ -695,6 +715,7 @@ impl App {
                         unread: 0,
                         relay: Some(relay.clone()),
                         relays: vec![relay.clone()],
+                        voice: g.has_voice,
                         channels: vec![Channel {
                             id: "chat".to_string(),
                             name: "chat".to_string(),
@@ -721,22 +742,34 @@ impl App {
     /// Lê mensagens no worker (NIP-29 ou Concord E2EE).
     fn op_fetch_messages(t: MsgTarget, ci: usize, chi: usize) -> OpResult {
         match t {
-            MsgTarget::Nip29 { relay, group } => match nostr::fetch_messages(&relay, &group, 50) {
-                Ok(msgs) => OpResult::Chat {
-                    ci,
-                    chi,
-                    messages: msgs
-                        .into_iter()
-                        .map(|m| Message {
-                            author: m.author,
-                            content: m.content,
-                            time: m.time,
-                            mine: false,
-                        })
-                        .collect(),
-                },
-                Err(e) => OpResult::Failed(format!("falha msgs: {e:#}")),
-            },
+            MsgTarget::Nip29 {
+                relay,
+                group,
+                voice,
+            } => {
+                let presence = if voice {
+                    nostr::fetch_participants(&relay, &group).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                match nostr::fetch_messages(&relay, &group, 50) {
+                    Ok(msgs) => OpResult::Chat {
+                        ci,
+                        chi,
+                        messages: msgs
+                            .into_iter()
+                            .map(|m| Message {
+                                author: m.author,
+                                content: m.content,
+                                time: m.time,
+                                mine: false,
+                            })
+                            .collect(),
+                        presence,
+                    },
+                    Err(e) => OpResult::Failed(format!("falha msgs: {e:#}")),
+                }
+            }
             MsgTarget::Concord {
                 relays,
                 sk,
@@ -777,6 +810,7 @@ impl App {
                     ci,
                     chi,
                     messages: msgs.into_iter().map(|(_, m)| m).collect(),
+                    presence: Vec::new(),
                 }
             }
         }

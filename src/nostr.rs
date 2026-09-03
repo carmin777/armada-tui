@@ -31,6 +31,20 @@ impl NostrEvent {
             .find(|t| t.first().map(|s| s == name).unwrap_or(false))
             .and_then(|t| t.get(1).map(|s| s.as_str()))
     }
+
+    pub fn has_tag(&self, name: &str) -> bool {
+        self.tags
+            .iter()
+            .any(|t| t.first().map(|s| s == name).unwrap_or(false))
+    }
+
+    pub fn tag_all(&self, name: &str) -> Vec<&str> {
+        self.tags
+            .iter()
+            .filter(|t| t.first().map(|s| s == name).unwrap_or(false))
+            .filter_map(|t| t.get(1).map(|s| s.as_str()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +54,8 @@ pub struct Nip29Group {
     pub about: String,
     #[allow(dead_code)]
     pub picture: String,
+    /// Tag `livekit` no anúncio 39000 → suporta sala de voz/vídeo.
+    pub has_voice: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +262,7 @@ pub fn fetch_groups(relay_url: &str) -> anyhow::Result<Vec<Nip29Group>> {
                 name,
                 about: e.tag("about").unwrap_or("").to_string(),
                 picture: e.tag("picture").unwrap_or("").to_string(),
+                has_voice: e.has_tag("livekit"),
             }
         })
         .collect())
@@ -267,6 +284,29 @@ pub fn fetch_messages(relay_url: &str, group_id: &str, limit: u32) -> anyhow::Re
             time: fmt_time(e.created_at),
         })
         .collect())
+}
+
+/// Participantes ao vivo (kind 39004, tags `participant`); pega o evento
+/// mais recente. Retorna pubkeys hex.
+pub fn parse_participants(ev: &NostrEvent) -> Vec<String> {
+    ev.tag_all("participant")
+        .into_iter()
+        .filter(|p| p.len() == 64 && hex::decode(p).is_ok())
+        .map(|p| p.to_string())
+        .collect()
+}
+
+/// Lê presença 39004 do grupo no relay.
+pub fn fetch_participants(relay_url: &str, group_id: &str) -> anyhow::Result<Vec<String>> {
+    let filter = serde_json::json!({"kinds": [39004], "#d": [group_id], "limit": 5});
+    let mut evs = req_events(relay_url, "armada-voice", filter, Duration::from_secs(12))?;
+    evs.sort_by_key(|e| e.created_at);
+    Ok(evs
+        .into_iter()
+        .rev()
+        .next()
+        .map(|e| parse_participants(&e))
+        .unwrap_or_default())
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +726,33 @@ mod tests {
         // OK final.
         let acts = f.on_relay_msg(&msg(serde_json::json!(["OK", "ev1", true, "ok"])));
         assert_eq!(acts, vec![FlowAction::Done("ok".to_string())]);
+    }
+
+    #[test]
+    fn presenca_39004_parse() {
+        // Fixture no formato da spec (kind 39004 do relay).
+        let ev = NostrEvent {
+            id: String::new(),
+            pubkey: String::new(),
+            created_at: 0,
+            kind: 39004,
+            tags: vec![
+                vec!["d".to_string(), "sala1".to_string()],
+                vec![
+                    "participant".to_string(),
+                    "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string(),
+                ],
+                vec!["participant".to_string(), "lixo".to_string()],
+                vec!["livekit".to_string(), "wss://voz.exemplo".to_string()],
+            ],
+            content: String::new(),
+            sig: String::new(),
+        };
+        assert!(ev.has_tag("livekit"));
+        assert!(!ev.has_tag("nada"));
+        let ps = parse_participants(&ev);
+        assert_eq!(ps.len(), 1);
+        assert!(ps[0].starts_with("79be667e"));
     }
 
     #[test]

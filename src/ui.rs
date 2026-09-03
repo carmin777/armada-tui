@@ -137,7 +137,13 @@ fn render_server(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 String::new()
             };
             let live = if c.relay.is_some() { "⚡" } else { "" };
-            ListItem::new(format!("{live}{}{} [{}]", c.name, unread, c.kind.label()))
+            let voice = if c.voice { "🔊" } else { "" };
+            ListItem::new(format!(
+                "{live}{voice}{}{} [{}]",
+                c.name,
+                unread,
+                c.kind.label()
+            ))
         })
         .collect();
     let list = List::new(items)

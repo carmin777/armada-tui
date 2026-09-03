@@ -1,4 +1,4 @@
-//! NIP-29 live (headless): groups | msgs <g> | join <g> | send <g> <texto>
+//! NIP-29 live (headless): groups | msgs <g> | voice <g> | join <g> | send <g> <texto>
 //! Uso: cargo run --example nip29_live -- <relay> <cmd> [args...]
 //! join/send usam identidade throwaway gerada na hora.
 
@@ -25,6 +25,14 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        "voice" => {
+            let group = std::env::args().nth(3).expect("grupo");
+            let ps = nostr::fetch_participants(&relay, &group)?;
+            println!("🔊 {} na chamada em {group}", ps.len());
+            for p in ps {
+                println!("  {p}");
+            }
+        }
         "join" => {
             let group = std::env::args().nth(3).expect("grupo");
             let k = nostr::generate()?;
@@ -38,7 +46,7 @@ fn main() -> anyhow::Result<()> {
             println!("identidade: {}", k.pubkey_hex);
             println!("send: {}", nostr::send_chat(&relay, &k, &group, &text)?);
         }
-        _ => anyhow::bail!("cmd: groups|msgs|join|send"),
+        _ => anyhow::bail!("cmd: groups|msgs|voice|join|send"),
     }
     Ok(())
 }
