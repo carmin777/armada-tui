@@ -20,6 +20,7 @@ fn main() -> anyhow::Result<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let b = inv::open_bundle(&ev, &p.link_signer, &p.token, now_ms)?;
     println!("frota: '{}' canais={}", b.name, b.channels.len());
+    println!("bundle debug: {b:#?}");
 
     for c in &b.channels {
         println!(

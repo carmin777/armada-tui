@@ -185,6 +185,7 @@ pub fn parse_invite_link(input: &str) -> Option<ParsedInvite> {
     })
 }
 
+#[derive(Debug)]
 pub struct BundleChannel {
     pub id: String,
     pub key: String,
@@ -192,6 +193,7 @@ pub struct BundleChannel {
     pub name: String,
 }
 
+#[derive(Debug)]
 pub struct Bundle {
     pub name: String,
     pub community_id: String,
