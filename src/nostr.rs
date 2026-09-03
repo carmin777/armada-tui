@@ -434,16 +434,9 @@ pub fn fetch_participants(
 /// Drop zeroíza o segredo: clones em workers se limpam sozinhos.
 #[derive(Debug, Clone)]
 pub struct Keys {
-    pub secret: [u8; 32],
+    pub secret: zeroize::Zeroizing<[u8; 32]>,
     pub pubkey_hex: String,
     pub npub: String,
-}
-
-impl Drop for Keys {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.secret.zeroize();
-    }
 }
 
 /// Aceita `nsec1…` (bech32) ou hex de 64 chars.
@@ -477,7 +470,7 @@ pub fn parse_secret(input: &str) -> anyhow::Result<Keys> {
         bech32::Variant::Bech32,
     )?;
     Ok(Keys {
-        secret: raw,
+        secret: zeroize::Zeroizing::new(raw),
         pubkey_hex,
         npub,
     })
@@ -507,7 +500,7 @@ fn keys_from_secret(raw: [u8; 32]) -> anyhow::Result<Keys> {
         bech32::Variant::Bech32,
     )?;
     Ok(Keys {
-        secret: raw,
+        secret: zeroize::Zeroizing::new(raw),
         pubkey_hex,
         npub,
     })

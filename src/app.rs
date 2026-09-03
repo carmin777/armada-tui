@@ -277,15 +277,12 @@ impl App {
     }
 
     pub fn logout(&mut self) {
-        use zeroize::Zeroize;
         self.authed = false;
         self.screen = Screen::Welcome;
         Self::wipe_string(&mut self.login_input);
         Self::wipe_string(&mut self.invite_input);
         // Chave da sessão + chaves E2EE dos canais: zeroíza tudo.
-        if let Some(mut s) = self.secret.take() {
-            s.zeroize();
-        }
+        drop(self.secret.take());
         for c in &mut self.communities {
             for ch in &mut c.channels {
                 if let Some(mut k) = ch.stream_sk.take() {
@@ -485,7 +482,7 @@ impl App {
         let (label, worker): (String, Box<dyn FnOnce() -> OpResult + Send>) = match op {
             PendingOp::Groups => {
                 let relay = self.relays.app_relays.first().cloned().unwrap_or_default();
-                let auth = self.secret.map(zeroize::Zeroizing::new);
+                let auth = self.secret.clone();
                 let cancel = self.cancel.clone();
                 (
                     format!("grupos em {relay}"),
@@ -552,7 +549,7 @@ impl App {
                 if link.is_empty() {
                     return;
                 }
-                let auth = self.secret.map(zeroize::Zeroizing::new);
+                let auth = self.secret.clone();
                 let cancel = self.cancel.clone();
                 (
                     "invite…".to_string(),
@@ -750,7 +747,7 @@ impl App {
                     .live_keys()
                     .map(|k| k.pubkey_hex.clone())
                     .unwrap_or_default(),
-                auth: self.secret.map(zeroize::Zeroizing::new),
+                auth: self.secret.clone(),
             });
         }
         match (&c.relay, &ch.live_group) {
@@ -758,7 +755,7 @@ impl App {
                 relay: r.clone(),
                 group: g.clone(),
                 voice: c.voice,
-                auth: self.secret.map(zeroize::Zeroizing::new),
+                auth: self.secret.clone(),
             }),
             _ => None,
         }
@@ -954,7 +951,7 @@ impl App {
             .rev()
             .collect();
         self.npub = format!("{}…{}{}", &keys.npub[..9], suffix, label);
-        self.secret = Some(keys.secret);
+        self.secret = Some(keys.secret.clone());
         self.live_write = true;
         self.authed = true;
         self.screen = Screen::Server;
