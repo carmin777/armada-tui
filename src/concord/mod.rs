@@ -8,3 +8,7 @@
 
 pub mod derive;
 pub mod nip44;
+pub mod stream;
+
+#[cfg(test)]
+pub mod fixture;
