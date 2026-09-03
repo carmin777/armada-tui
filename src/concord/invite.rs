@@ -209,9 +209,13 @@ pub fn invite_bundle_key(token: &[u8]) -> [u8; 32] {
 /// tem a versão atual).
 pub fn fetch_bundle_event(relays: &[String], signer: &str) -> anyhow::Result<serde_json::Value> {
     let filter = serde_json::json!({"kinds": [KIND_INVITE_BUNDLE], "authors": [signer], "#d": [""], "limit": 5});
+    let relays = crate::netpolicy::filter_relays(relays);
+    if relays.is_empty() {
+        anyhow::bail!("nenhum relay permitido na política");
+    }
     let mut best: Option<(i64, serde_json::Value)> = None;
     let mut errors = Vec::new();
-    for r in relays {
+    for r in &relays {
         match crate::nostr::req_events(
             r,
             "armada-invite",
@@ -365,10 +369,14 @@ pub fn fetch_wraps(
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let filter =
         serde_json::json!({"kinds": [1059, 21059], "authors": [stream_pk], "limit": limit});
+    let relays = crate::netpolicy::filter_relays(relays);
+    if relays.is_empty() {
+        anyhow::bail!("nenhum relay permitido na política");
+    }
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     let mut errors = Vec::new();
-    for r in relays {
+    for r in &relays {
         match crate::nostr::req_events(
             r,
             "armada-wraps",

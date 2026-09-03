@@ -21,82 +21,63 @@ pub fn supported() -> bool {
     )
 }
 
-/// Hosts que `v` nunca busca (SSRF básico: tecla `v` abre URL de mensagem
-/// alheia — sem isso um rumor malicioso sondaria a rede local/nuvem).
-fn host_bloqueado(host: &str) -> bool {
-    let h = host.to_lowercase();
-    // IPv6 entre colchetes, com ou sem porta: [::1], [::1]:8080.
-    if let Some(rest) = h.strip_prefix('[') {
-        let inner = rest.split(']').next().unwrap_or("");
-        return inner == "::1" || inner.is_empty();
-    }
-    // Tira :porta quando há um único ':' e o resto é numérico.
-    let h = match h.rsplit_once(':') {
-        Some((left, port)) if !left.contains(':') && port.parse::<u16>().is_ok() => left,
-        _ => h.as_str(),
-    };
-    if ["localhost", ""].contains(&h) {
-        return true;
-    }
-    for suf in [
-        ".local",
-        ".internal",
-        ".lan",
-        ".localhost",
-        ".invalid",
-        ".test",
-        ".example",
-    ] {
-        if h.ends_with(suf) {
-            return true;
-        }
-    }
-    // IPv4 privadas/link-local + metadata cloud.
-    let parts: Vec<&str> = h.split('.').collect();
-    if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
-        let n: Vec<u8> = parts.iter().map(|p| p.parse().unwrap()).collect();
-        if n[0] == 127 || n[0] == 10 || n[0] == 169 && n[1] == 254 {
-            return true;
-        }
-        if n[0] == 192 && n[1] == 168 {
-            return true;
-        }
-        if n[0] == 172 && (16..=31).contains(&n[1]) {
-            return true;
-        }
-    }
-    // IPv6 loopback/ULA literais (só quando é literal, com ':').
-    if h == "::1" || (h.contains(':') && (h.starts_with("fc") || h.starts_with("fd"))) {
-        return true;
-    }
-    false
-}
-
-fn check_url(url: &str) -> anyhow::Result<()> {
-    let lower = url.to_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        anyhow::bail!("só http(s)");
-    }
-    let after = url.split("://").nth(1).unwrap_or("");
-    let host = after.split('/').next().unwrap_or("");
-    if host_bloqueado(host) {
-        anyhow::bail!("host bloqueado p/ viewer ({host})");
-    }
-    Ok(())
-}
-
 /// Baixa URL e valida que é PNG (magic bytes). Teto real de 8 MiB: lê no
-/// máximo 8 MiB+1 (servidor malicioso não enche a RAM).
+/// máximo 8 MiB+1 (servidor malicioso não enche a RAM). Redirects seguidos
+/// manualmente com revalidação a cada salto (máx 3).
 pub fn fetch_png(url: &str) -> anyhow::Result<Vec<u8>> {
-    check_url(url)?;
     const TETO: u64 = 8_000_001;
-    let res = ureq::get(url).timeout(Duration::from_secs(15)).call()?;
-    let ct = res.header("content-type").unwrap_or("").to_string();
-    if !(ct.is_empty() || ct.contains("image/png") || ct.contains("octet-stream")) {
-        anyhow::bail!("content-type não é PNG: {ct}");
+    let mut current = url.to_string();
+    let mut body: Option<Vec<u8>> = None;
+    let mut content_type = String::new();
+    for _ in 0..=3 {
+        crate::netpolicy::check_http_url(&current)?;
+        let agent: ureq::Agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(15))
+            .redirects(0)
+            .build();
+        let res = agent.get(&current).call()?;
+        let status = res.status();
+        if [301, 302, 303, 307, 308].contains(&status) {
+            let loc = res.header("location").unwrap_or("").to_string();
+            if loc.is_empty() {
+                anyhow::bail!("redirect sem location");
+            }
+            current = if loc.starts_with("http://") || loc.starts_with("https://") {
+                loc
+            } else if let Some(base) = current.split("://").next() {
+                let host = current
+                    .split("://")
+                    .nth(1)
+                    .unwrap_or("")
+                    .split('/')
+                    .next()
+                    .unwrap_or("");
+                format!(
+                    "{base}://{host}{}",
+                    if loc.starts_with('/') {
+                        loc
+                    } else {
+                        format!("/{loc}")
+                    }
+                )
+            } else {
+                anyhow::bail!("redirect estranho");
+            };
+            continue;
+        }
+        content_type = res.header("content-type").unwrap_or("").to_string();
+        let mut bytes = Vec::new();
+        res.into_reader().take(TETO).read_to_end(&mut bytes)?;
+        body = Some(bytes);
+        break;
     }
-    let mut bytes = Vec::new();
-    res.into_reader().take(TETO).read_to_end(&mut bytes)?;
+    let bytes = body.ok_or_else(|| anyhow::anyhow!("redirects demais"))?;
+    if !(content_type.is_empty()
+        || content_type.contains("image/png")
+        || content_type.contains("octet-stream"))
+    {
+        anyhow::bail!("content-type não é PNG: {content_type}");
+    }
     if bytes.len() as u64 >= TETO {
         anyhow::bail!("imagem > 8 MiB, recusada");
     }

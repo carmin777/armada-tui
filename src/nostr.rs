@@ -59,9 +59,9 @@ fn fmt_time(ts: i64) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-/// REQ genérico: conecta, manda filtro, coleta EVENTs até EOSE ou deadline.
-/// Roda numa thread filha; o socket tem read-timeout então a thread morre
-/// sozinha se o relay travar (sem órfãs eternas).
+/// REQ genérico: conecta (teto 10s), manda filtro, coleta EVENTs até EOSE.
+/// Deadline = timeout do chamador; sem EOSE = erro (sem sucesso parcial).
+/// Roda em worker: socket com read-timeout morre sozinho.
 pub(crate) fn req_events(
     relay_url: &str,
     sub_id: &str,
@@ -75,14 +75,26 @@ pub(crate) fn req_events(
 
     std::thread::spawn(move || {
         let out = (|| -> anyhow::Result<Vec<NostrEvent>> {
-            let (mut socket, _) = tungstenite::connect(url)?;
+            let (mut socket, _) = {
+                let (tx2, rx2) = mpsc::channel();
+                let url2 = url.clone();
+                std::thread::spawn(move || {
+                    let _ = tx2.send(tungstenite::connect(&url2));
+                });
+                rx2.recv_timeout(Duration::from_secs(10))?? as Result<_, tungstenite::Error>
+            }?;
             arm_timeouts(&mut socket);
             socket.send(tungstenite::Message::Text(req))?;
             let mut events = Vec::new();
-            let deadline = Instant::now() + Duration::from_secs(25);
+            let mut eose = false;
+            let deadline = Instant::now() + timeout;
             loop {
                 if Instant::now() > deadline {
                     break;
+                }
+                // Teto anti-DoS: relay que ignora limit não inunda a RAM.
+                if events.len() >= 2000 {
+                    anyhow::bail!("relay excedeu 2000 eventos");
                 }
                 match socket.read() {
                     Ok(tungstenite::Message::Text(txt)) => {
@@ -99,7 +111,10 @@ pub(crate) fn req_events(
                                     }
                                 }
                             }
-                            Some("EOSE") => break,
+                            Some("EOSE") => {
+                                eose = true;
+                                break;
+                            }
                             _ => {}
                         }
                     }
@@ -109,6 +124,9 @@ pub(crate) fn req_events(
             }
             let _ = socket.send(tungstenite::Message::Text(bye));
             let _ = socket.close(None);
+            if !eose {
+                anyhow::bail!("relay encerrou sem EOSE (resposta incompleta)");
+            }
             Ok(events)
         })();
         let _ = tx.send(out);
@@ -151,7 +169,8 @@ pub(crate) fn validate_fields(
     use sha2::Digest;
     let commit = serde_json::json!([0, pubkey, created_at, kind, tags, content]);
     let digest = sha2::Sha256::digest(serde_json::to_string(&commit)?.as_bytes());
-    if hex::encode(digest) != id.to_lowercase() {
+    // Estrito: id canônico é hex minúsculo (sem to_lowercase p/ fugir).
+    if hex::encode(digest) != id {
         anyhow::bail!("id não confere");
     }
     let secp = secp256k1::Secp256k1::new();
@@ -212,10 +231,12 @@ pub(crate) fn validate_value(ev: &serde_json::Value) -> anyhow::Result<()> {
 
 /// Lista grupos públicos (kind 39000) do relay.
 pub fn fetch_groups(relay_url: &str) -> anyhow::Result<Vec<Nip29Group>> {
+    crate::netpolicy::check_relay_url(relay_url)?;
     let filter = serde_json::json!({"kinds": [39000]});
     let evs = req_events(relay_url, "armada-groups", filter, Duration::from_secs(15))?;
     Ok(evs
         .into_iter()
+        .filter(|e| e.kind == 39000)
         .map(|e| {
             let id = e.tag("d").unwrap_or("?").to_string();
             let name = e.tag("name").unwrap_or(&id).to_string();
@@ -231,10 +252,12 @@ pub fn fetch_groups(relay_url: &str) -> anyhow::Result<Vec<Nip29Group>> {
 
 /// Últimas mensagens com tag `h = group_id` (kinds 1/7/9/11/1111), ordenadas.
 pub fn fetch_messages(relay_url: &str, group_id: &str, limit: u32) -> anyhow::Result<Vec<ChatMsg>> {
+    crate::netpolicy::check_relay_url(relay_url)?;
     let filter =
         serde_json::json!({"kinds": [1, 7, 9, 11, 1111], "#h": [group_id], "limit": limit});
     let mut evs = req_events(relay_url, "armada-msgs", filter, Duration::from_secs(15))?;
     evs.sort_by_key(|e| e.created_at);
+    evs.retain(|e| matches!(e.kind, 1 | 7 | 9 | 11 | 1111));
     Ok(evs
         .into_iter()
         .map(|e| ChatMsg {
@@ -364,14 +387,93 @@ pub fn sign_event_with(
     }))
 }
 
-/// Publica evento respondendo NIP-42 (`["AUTH", challenge]` → kind 22242).
-/// Retorna o `id` em caso de `OK:true`, ou erro com a mensagem do relay.
+/// Máquina de estados NIP-42 p/ publish (pura, testável sem rede).
+/// Regras: EVENT primeiro; AUTH → responde e SÓ reenvia EVENT após OK:true
+/// do auth; OK:false com auth-required antes de autenticar = espera, não aborta.
+pub struct PublishFlow {
+    id: String,
+    authed: bool,
+    pending_auth: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FlowAction {
+    SendEvent,
+    SendAuth(String),
+    Done(String),
+    Fail(String),
+    Ignore,
+}
+
+impl PublishFlow {
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            authed: false,
+            pending_auth: None,
+        }
+    }
+
+    pub fn start(&mut self) -> FlowAction {
+        FlowAction::SendEvent
+    }
+
+    pub fn note_auth_sent(&mut self, auth_id: String) {
+        self.pending_auth = Some(auth_id);
+    }
+
+    fn is_auth_error(msg: &str) -> bool {
+        let m = msg.to_lowercase();
+        m.contains("auth-required") || m.contains("restricted:") || m.contains("authentication")
+    }
+
+    pub fn on_relay_msg(&mut self, v: &serde_json::Value) -> Vec<FlowAction> {
+        match v.get(0).and_then(|x| x.as_str()) {
+            Some("AUTH") => {
+                if self.authed {
+                    return vec![FlowAction::Ignore];
+                }
+                let ch = v.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                vec![FlowAction::SendAuth(ch)]
+            }
+            Some("OK") => {
+                let oid = v.get(1).and_then(|x| x.as_str()).unwrap_or("");
+                let ok = v.get(2).and_then(|x| x.as_bool()).unwrap_or(false);
+                let msg = v.get(3).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                if Some(oid) == self.pending_auth.as_deref() {
+                    if ok {
+                        self.authed = true;
+                        self.pending_auth = None;
+                        return vec![FlowAction::SendEvent];
+                    }
+                    return vec![FlowAction::Fail(format!("auth rejeitado: {msg}"))];
+                }
+                if oid == self.id {
+                    if ok {
+                        return vec![FlowAction::Done(if msg.is_empty() {
+                            self.id.clone()
+                        } else {
+                            msg
+                        })];
+                    }
+                    if !self.authed && Self::is_auth_error(&msg) {
+                        return vec![FlowAction::Ignore];
+                    }
+                    return vec![FlowAction::Fail(format!("relay rejeitou: {msg}"))];
+                }
+                vec![FlowAction::Ignore]
+            }
+            _ => vec![FlowAction::Ignore],
+        }
+    }
+}
 pub fn publish(
     relay_url: &str,
     keys: Option<&Keys>,
     event: serde_json::Value,
     timeout: Duration,
 ) -> anyhow::Result<String> {
+    crate::netpolicy::check_relay_url(relay_url)?;
     let (tx, rx) = mpsc::channel();
     let url = relay_url.to_string();
     let id = event
@@ -384,8 +486,18 @@ pub fn publish(
 
     std::thread::spawn(move || {
         let out = (|| -> anyhow::Result<String> {
-            let (mut socket, _) = tungstenite::connect(url.clone())?;
+            // Connect com teto próprio (handshake sem timeout = thread órfã).
+            let (mut socket, _) = {
+                let (tx2, rx2) = mpsc::channel();
+                let url2 = url.clone();
+                std::thread::spawn(move || {
+                    let _ = tx2.send(tungstenite::connect(&url2));
+                });
+                rx2.recv_timeout(Duration::from_secs(10))?? as Result<_, tungstenite::Error>
+            }?;
             arm_timeouts(&mut socket);
+            let mut flow = PublishFlow::new(id.clone());
+            debug_assert!(matches!(flow.start(), FlowAction::SendEvent));
             let send_event = |socket: &mut Ws| -> anyhow::Result<()> {
                 socket.send(tungstenite::Message::Text(
                     serde_json::json!([
@@ -396,26 +508,8 @@ pub fn publish(
                 ))?;
                 Ok(())
             };
-            let send_auth = |socket: &mut Ws, challenge: &str| -> anyhow::Result<()> {
-                let k = keys.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("relay pediu NIP-42 mas não há chave (faça login com nsec)")
-                })?;
-                let ev = sign_event(
-                    &k.secret,
-                    22242,
-                    vec![
-                        vec!["relay".to_string(), url.clone()],
-                        vec!["challenge".to_string(), challenge.to_string()],
-                    ],
-                    "",
-                )?;
-                socket.send(tungstenite::Message::Text(
-                    serde_json::json!(["AUTH", ev]).to_string(),
-                ))?;
-                Ok(())
-            };
             send_event(&mut socket)?;
-            let deadline = Instant::now() + Duration::from_secs(25);
+            let deadline = Instant::now() + timeout;
             loop {
                 if Instant::now() > deadline {
                     anyhow::bail!("sem resposta OK do relay");
@@ -423,26 +517,39 @@ pub fn publish(
                 match socket.read() {
                     Ok(tungstenite::Message::Text(txt)) => {
                         let v: serde_json::Value = serde_json::from_str(&txt)?;
-                        match v.get(0).and_then(|x| x.as_str()) {
-                            Some("AUTH") => {
-                                let ch = v.get(1).and_then(|x| x.as_str()).unwrap_or("");
-                                send_auth(&mut socket, ch)?;
-                                // NIP-42: depois de autenticar, reenvia o EVENT.
-                                send_event(&mut socket)?;
-                            }
-                            Some("OK")
-                                if v.get(1).and_then(|x| x.as_str()) == Some(id.as_str()) =>
-                            {
-                                let ok = v.get(2).and_then(|x| x.as_bool()).unwrap_or(false);
-                                let msg =
-                                    v.get(3).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                                if ok {
-                                    let _ = socket.close(None);
-                                    return Ok(if msg.is_empty() { id } else { msg });
+                        for act in flow.on_relay_msg(&v) {
+                            match act {
+                                FlowAction::SendEvent => send_event(&mut socket)?,
+                                FlowAction::SendAuth(ch) => {
+                                    let k = keys.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("relay pediu NIP-42 mas não há chave")
+                                    })?;
+                                    let ev = sign_event(
+                                        &k.secret,
+                                        22242,
+                                        vec![
+                                            vec!["relay".to_string(), url.clone()],
+                                            vec!["challenge".to_string(), ch],
+                                        ],
+                                        "",
+                                    )?;
+                                    let aid = ev
+                                        .get("id")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    socket.send(tungstenite::Message::Text(
+                                        serde_json::json!(["AUTH", ev]).to_string(),
+                                    ))?;
+                                    flow.note_auth_sent(aid);
                                 }
-                                anyhow::bail!("relay rejeitou: {msg}");
+                                FlowAction::Done(out) => {
+                                    let _ = socket.close(None);
+                                    return Ok(out);
+                                }
+                                FlowAction::Fail(e) => anyhow::bail!("{e}"),
+                                FlowAction::Ignore => {}
                             }
-                            _ => {}
                         }
                     }
                     Ok(_) => {}
@@ -465,6 +572,10 @@ pub fn publish_concord(
     wrap: serde_json::Value,
     keys: Option<&Keys>,
 ) -> anyhow::Result<usize> {
+    let relays = crate::netpolicy::filter_relays(relays);
+    if relays.is_empty() {
+        anyhow::bail!("nenhum relay permitido na política");
+    }
     let mut oks = 0usize;
     let mut last_err = anyhow::anyhow!("sem relays");
     for r in relays {
@@ -537,5 +648,59 @@ mod tests {
         let k = generate().unwrap();
         assert_eq!(k.pubkey_hex.len(), 64);
         assert!(k.npub.starts_with("npub1"));
+    }
+
+    fn msg(v: serde_json::Value) -> serde_json::Value {
+        v
+    }
+
+    #[test]
+    fn flow_relay_aberto() {
+        let mut f = PublishFlow::new("ev1".to_string());
+        assert_eq!(f.start(), FlowAction::SendEvent);
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["OK", "ev1", true, ""])));
+        assert_eq!(acts, vec![FlowAction::Done("ev1".to_string())]);
+    }
+
+    #[test]
+    fn flow_nip42_completo() {
+        let mut f = PublishFlow::new("ev1".to_string());
+        assert_eq!(f.start(), FlowAction::SendEvent);
+        // Relay pede auth antes: OK:false auth-required NÃO aborta.
+        let acts = f.on_relay_msg(&msg(serde_json::json!([
+            "OK",
+            "ev1",
+            false,
+            "auth-required: login"
+        ])));
+        assert_eq!(acts, vec![FlowAction::Ignore]);
+        // Desafio → responde auth (sem reenviar EVENT ainda).
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["AUTH", "ch rover"])));
+        assert_eq!(acts, vec![FlowAction::SendAuth("ch rover".to_string())]);
+        f.note_auth_sent("auth9".to_string());
+        // OK do auth → SÓ agora reenvia EVENT.
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["OK", "auth9", true, ""])));
+        assert_eq!(acts, vec![FlowAction::SendEvent]);
+        // OK final.
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["OK", "ev1", true, "ok"])));
+        assert_eq!(acts, vec![FlowAction::Done("ok".to_string())]);
+    }
+
+    #[test]
+    fn flow_auth_rejeitado_e_erro_real() {
+        let mut f = PublishFlow::new("ev1".to_string());
+        f.on_relay_msg(&msg(serde_json::json!(["AUTH", "ch"])));
+        f.note_auth_sent("auth9".to_string());
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["OK", "auth9", false, "banned"])));
+        assert!(matches!(acts[0], FlowAction::Fail(_)));
+        // Erro não-auth aborta na hora.
+        let mut g = PublishFlow::new("ev2".to_string());
+        let acts = g.on_relay_msg(&msg(serde_json::json!([
+            "OK",
+            "ev2",
+            false,
+            "blocked: spam"
+        ])));
+        assert!(matches!(acts[0], FlowAction::Fail(_)));
     }
 }

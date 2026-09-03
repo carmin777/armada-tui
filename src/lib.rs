@@ -3,6 +3,7 @@ pub mod concord;
 pub mod kitty;
 pub mod mock;
 pub mod models;
+pub mod netpolicy;
 pub mod nostr;
 pub mod parity;
 pub mod ui;

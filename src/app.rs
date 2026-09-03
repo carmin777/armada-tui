@@ -84,6 +84,7 @@ pub enum OpResult {
 /// Operação em voo: a UI desenha spinner e continua respondendo.
 pub struct BusyOp {
     pub label: String,
+    pub session: u64,
     pub rx: std::sync::mpsc::Receiver<OpResult>,
 }
 
@@ -137,6 +138,7 @@ pub struct App {
     pub live_write: bool,
     pub invite_mode: bool,
     pub invite_input: String,
+    pub session: u64,
     pub should_quit: bool,
 }
 
@@ -174,6 +176,7 @@ impl App {
             live_write: false,
             invite_mode: false,
             invite_input: String::new(),
+            session: 0,
             should_quit: false,
         }
     }
@@ -253,14 +256,35 @@ impl App {
     }
 
     pub fn logout(&mut self) {
+        use zeroize::Zeroize;
         self.authed = false;
         self.screen = Screen::Welcome;
         self.login_input.clear();
-        // P1-4: zeroíza a chave ao sair (não só dropa).
+        self.login_input.zeroize();
+        self.invite_input.clear();
+        self.invite_input.zeroize();
+        // Chave da sessão + chaves E2EE dos canais: zeroíza tudo.
         if let Some(mut s) = self.secret.take() {
-            use zeroize::Zeroize;
             s.zeroize();
         }
+        for c in &mut self.communities {
+            for ch in &mut c.channels {
+                if let Some(mut k) = ch.stream_sk.take() {
+                    k.zeroize();
+                }
+            }
+        }
+        // Volta ao mock: nada da sessão anterior sobrevive.
+        self.communities = mock::mock_communities();
+        self.sel_community = 0;
+        self.sel_channel = 0;
+        self.msg_scroll = 0;
+        self.input.clear();
+        self.input_mode = false;
+        // Workers antigos morrem órfãos: resultados de outra sessão são ignorados.
+        self.busy = None;
+        self.pending = None;
+        self.session = self.session.wrapping_add(1);
         self.live_write = false;
         self.npub = "npub1…não logado".to_string();
         self.status = "desconectado".to_string();
@@ -509,11 +533,20 @@ impl App {
             let out = worker();
             let _ = tx.send(out);
         });
-        self.busy = Some(BusyOp { label, rx });
+        self.busy = Some(BusyOp {
+            label,
+            rx,
+            session: self.session,
+        });
     }
 
     /// Colhe resultado do worker (não bloqueia) e aplica no estado.
     pub fn poll_busy(&mut self) {
+        let stale = matches!(&self.busy, Some(b) if b.session != self.session);
+        if stale {
+            self.busy = None;
+            return;
+        }
         let done = match &self.busy {
             Some(b) => match b.rx.try_recv() {
                 Ok(out) => Some(out),
