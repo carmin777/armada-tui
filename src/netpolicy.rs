@@ -23,6 +23,10 @@ fn is_public_ip(ip: &IpAddr) -> bool {
                 || v.is_unspecified())
         }
         IpAddr::V6(v) => {
+            // IPv4-mapped (::ffff:127.0.0.1) valida como IPv4.
+            if let Some(mapped) = v.to_ipv4_mapped() {
+                return is_public_ip(&IpAddr::V4(mapped));
+            }
             !(v.is_loopback()
                 || v.is_multicast()
                 || v.is_unspecified()
@@ -138,6 +142,8 @@ mod tests {
             "https://localhost:8080/x",
             "https://[::1]/x",
             "https://[fc00::1]/x",
+            "https://[::ffff:127.0.0.1]/x",
+            "https://[::ffff:10.0.0.1]/x",
             "https://[fe80::1]/x",
             "http://169.254.169.254/meta",
             "https://printer.local/x",

@@ -8,8 +8,14 @@
 //! Grupos privados (NIP-42 auth) e escrita/E2EE ficam p/ fases seguintes.
 
 use serde::Deserialize;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+
+/// Flag que nunca cancela (exemplos/testes sem sessão).
+pub fn never_cancel() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NostrEvent {
@@ -84,7 +90,8 @@ pub(crate) fn req_events(
     sub_id: &str,
     filter: serde_json::Value,
     timeout: Duration,
-    auth: Option<[u8; 32]>,
+    auth: Option<zeroize::Zeroizing<[u8; 32]>>,
+    cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<Vec<NostrEvent>> {
     let (tx, rx) = mpsc::channel();
     let url = relay_url.to_string();
@@ -108,10 +115,15 @@ pub(crate) fn req_events(
                 Ok(())
             };
             send_req(&mut socket)?;
+            let mut flow = ReadFlow::new();
             let mut events = Vec::new();
             let mut eose = false;
             let deadline = Instant::now() + timeout;
             loop {
+                // Logout cancela: worker não assina nem envia mais nada.
+                if cancel.load(Ordering::Relaxed) {
+                    anyhow::bail!("cancelado (logout)");
+                }
                 if Instant::now() > deadline {
                     break;
                 }
@@ -122,25 +134,42 @@ pub(crate) fn req_events(
                 match socket.read() {
                     Ok(tungstenite::Message::Text(txt)) => {
                         let v: serde_json::Value = serde_json::from_str(&txt)?;
-                        // NIP-42 no read: responde AUTH e reenvia o REQ.
-                        if v.get(0).and_then(|x| x.as_str()) == Some("AUTH") {
-                            if let Some(secret) = auth {
-                                let ch = v.get(1).and_then(|x| x.as_str()).unwrap_or("");
-                                let ev = sign_event(
-                                    &secret,
-                                    22242,
-                                    vec![
-                                        vec!["relay".to_string(), url.clone()],
-                                        vec!["challenge".to_string(), ch.to_string()],
-                                    ],
-                                    "",
-                                )?;
-                                socket.send(tungstenite::Message::Text(
-                                    serde_json::json!(["AUTH", ev]).to_string(),
-                                ))?;
-                                send_req(&mut socket)?;
+                        // NIP-42 no read via máquina (reenvia REQ só após OK do auth).
+                        if matches!(v.get(0).and_then(|x| x.as_str()), Some("AUTH") | Some("OK")) {
+                            let mut acted = false;
+                            for act in flow.on_relay_msg(&v) {
+                                acted = true;
+                                match act {
+                                    ReadAction::SendReq => send_req(&mut socket)?,
+                                    ReadAction::SendAuth(ch) => {
+                                        if let Some(secret) = &auth {
+                                            let ev = sign_event(
+                                                secret,
+                                                22242,
+                                                vec![
+                                                    vec!["relay".to_string(), url.clone()],
+                                                    vec!["challenge".to_string(), ch],
+                                                ],
+                                                "",
+                                            )?;
+                                            let aid = ev
+                                                .get("id")
+                                                .and_then(|x| x.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            socket.send(tungstenite::Message::Text(
+                                                serde_json::json!(["AUTH", ev]).to_string(),
+                                            ))?;
+                                            flow.note_auth_sent(aid);
+                                        }
+                                    }
+                                    ReadAction::Fail(e) => anyhow::bail!("{e}"),
+                                    ReadAction::Ignore => {}
+                                }
                             }
-                            continue;
+                            if acted {
+                                continue;
+                            }
                         }
                         match v.get(0).and_then(|x| x.as_str()) {
                             Some("EVENT") => {
@@ -274,7 +303,11 @@ pub(crate) fn validate_value(ev: &serde_json::Value) -> anyhow::Result<()> {
 
 /// Lista grupos públicos (kind 39000) do relay. Sem tag `d` = descarta;
 /// duplicados por `d` ficam com o mais recente (não confia no relay).
-pub fn fetch_groups(relay_url: &str, auth: Option<[u8; 32]>) -> anyhow::Result<Vec<Nip29Group>> {
+pub fn fetch_groups(
+    relay_url: &str,
+    auth: Option<zeroize::Zeroizing<[u8; 32]>>,
+    cancel: Arc<AtomicBool>,
+) -> anyhow::Result<Vec<Nip29Group>> {
     crate::netpolicy::check_relay_url(relay_url)?;
     let filter = serde_json::json!({"kinds": [39000]});
     let evs = req_events(
@@ -283,6 +316,7 @@ pub fn fetch_groups(relay_url: &str, auth: Option<[u8; 32]>) -> anyhow::Result<V
         filter,
         Duration::from_secs(15),
         auth,
+        cancel,
     )?;
     let mut by_id: std::collections::HashMap<String, NostrEvent> = std::collections::HashMap::new();
     for e in evs.into_iter().filter(|e| e.kind == 39000) {
@@ -321,7 +355,8 @@ pub fn fetch_messages(
     relay_url: &str,
     group_id: &str,
     limit: u32,
-    auth: Option<[u8; 32]>,
+    auth: Option<zeroize::Zeroizing<[u8; 32]>>,
+    cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<Vec<ChatMsg>> {
     crate::netpolicy::check_relay_url(relay_url)?;
     let filter =
@@ -332,6 +367,7 @@ pub fn fetch_messages(
         filter,
         Duration::from_secs(15),
         auth,
+        cancel,
     )?;
     evs.sort_by_key(|e| e.created_at);
     evs.retain(|e| matches!(e.kind, 1 | 7 | 9 | 11 | 1111));
@@ -368,7 +404,8 @@ pub fn parse_participants(ev: &NostrEvent) -> Vec<String> {
 pub fn fetch_participants(
     relay_url: &str,
     group_id: &str,
-    auth: Option<[u8; 32]>,
+    auth: Option<zeroize::Zeroizing<[u8; 32]>>,
+    cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<Vec<String>> {
     crate::netpolicy::check_relay_url(relay_url)?;
     let filter = serde_json::json!({"kinds": [39004], "#d": [group_id], "limit": 5});
@@ -378,6 +415,7 @@ pub fn fetch_participants(
         filter,
         Duration::from_secs(12),
         auth,
+        cancel,
     )?;
     evs.retain(|e| e.kind == 39004 && e.tag("d").map(|d| d == group_id).unwrap_or(false));
     evs.sort_by_key(|e| e.created_at);
@@ -595,11 +633,71 @@ impl PublishFlow {
         }
     }
 }
+
+/// Máquina NIP-42 p/ LEITURA (pura, testável): AUTH → responde e SÓ
+/// reenvia o REQ após OK:true do auth (não imediatamente).
+pub struct ReadFlow {
+    authed: bool,
+    pending_auth: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReadAction {
+    SendReq,
+    SendAuth(String),
+    Fail(String),
+    Ignore,
+}
+
+impl ReadFlow {
+    pub fn new() -> Self {
+        Self { authed: false, pending_auth: None }
+    }
+
+    pub fn note_auth_sent(&mut self, auth_id: String) {
+        self.pending_auth = Some(auth_id);
+    }
+
+    pub fn on_relay_msg(&mut self, v: &serde_json::Value) -> Vec<ReadAction> {
+        match v.get(0).and_then(|x| x.as_str()) {
+            Some("AUTH") => {
+                if self.authed {
+                    return vec![ReadAction::Ignore];
+                }
+                let ch = v.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                vec![ReadAction::SendAuth(ch)]
+            }
+            Some("OK") => {
+                let oid = v.get(1).and_then(|x| x.as_str()).unwrap_or("");
+                if Some(oid) == self.pending_auth.as_deref() {
+                    let ok = v.get(2).and_then(|x| x.as_bool()).unwrap_or(false);
+                    if ok {
+                        self.authed = true;
+                        self.pending_auth = None;
+                        return vec![ReadAction::SendReq];
+                    }
+                    let msg = v.get(3).and_then(|x| x.as_str()).unwrap_or("");
+                    return vec![ReadAction::Fail(format!("auth rejeitado: {msg}"))];
+                }
+                vec![ReadAction::Ignore]
+            }
+            _ => vec![ReadAction::Ignore],
+        }
+    }
+}
+
+impl Default for ReadFlow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn publish(
     relay_url: &str,
     keys: Option<&Keys>,
     event: serde_json::Value,
     timeout: Duration,
+    cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<String> {
     crate::netpolicy::check_relay_url(relay_url)?;
     let (tx, rx) = mpsc::channel();
@@ -640,6 +738,9 @@ pub fn publish(
             send_event(&mut socket)?;
             let deadline = Instant::now() + timeout;
             loop {
+                if cancel.load(Ordering::Relaxed) {
+                    anyhow::bail!("cancelado (logout)");
+                }
                 if Instant::now() > deadline {
                     anyhow::bail!("sem resposta OK do relay");
                 }
@@ -701,6 +802,7 @@ pub fn publish_concord(
     relays: &[String],
     wrap: serde_json::Value,
     keys: Option<&Keys>,
+    cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<usize> {
     let relays = crate::netpolicy::filter_relays(relays);
     if relays.is_empty() {
@@ -740,6 +842,7 @@ pub fn send_chat(
     keys: &Keys,
     group_id: &str,
     content: &str,
+    cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<String> {
     let ev = sign_event(
         &keys.secret,
@@ -747,18 +850,23 @@ pub fn send_chat(
         vec![vec!["h".to_string(), group_id.to_string()]],
         content,
     )?;
-    publish(relay_url, Some(keys), ev, Duration::from_secs(20))
+    publish(relay_url, Some(keys), ev, Duration::from_secs(20), cancel)
 }
 
 /// Pedido de entrada no grupo (kind 9021).
-pub fn send_join(relay_url: &str, keys: &Keys, group_id: &str) -> anyhow::Result<String> {
+pub fn send_join(
+    relay_url: &str,
+    keys: &Keys,
+    group_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> anyhow::Result<String> {
     let ev = sign_event(
         &keys.secret,
         9021,
         vec![vec!["h".to_string(), group_id.to_string()]],
         "armada-tui",
     )?;
-    publish(relay_url, Some(keys), ev, Duration::from_secs(20))
+    publish(relay_url, Some(keys), ev, Duration::from_secs(20), cancel)
 }
 
 #[cfg(test)]
@@ -796,6 +904,30 @@ mod tests {
 
     fn msg(v: serde_json::Value) -> serde_json::Value {
         v
+    }
+
+    #[test]
+    fn readflow_espera_ok_do_auth() {
+        let mut f = ReadFlow::new();
+        // Desafio → pede auth, SEM reenviar REQ ainda.
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["AUTH", "ch1"])));
+        assert_eq!(acts, vec![ReadAction::SendAuth("ch1".to_string())]);
+        f.note_auth_sent("a1".to_string());
+        // OK do auth → agora sim reenvia REQ.
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["OK", "a1", true, ""])));
+        assert_eq!(acts, vec![ReadAction::SendReq]);
+        // Segundo desafio com sessão autenticada → ignora.
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["AUTH", "ch2"])));
+        assert_eq!(acts, vec![ReadAction::Ignore]);
+    }
+
+    #[test]
+    fn readflow_auth_negado_falha() {
+        let mut f = ReadFlow::new();
+        f.on_relay_msg(&msg(serde_json::json!(["AUTH", "ch1"])));
+        f.note_auth_sent("a1".to_string());
+        let acts = f.on_relay_msg(&msg(serde_json::json!(["OK", "a1", false, "banned"])));
+        assert!(matches!(acts[0], ReadAction::Fail(_)));
     }
 
     #[test]

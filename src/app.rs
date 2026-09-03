@@ -109,7 +109,7 @@ pub enum MsgTarget {
         relay: String,
         group: String,
         voice: bool,
-        auth: Option<[u8; 32]>,
+        auth: Option<zeroize::Zeroizing<[u8; 32]>>,
     },
     Concord {
         relays: Vec<String>,
@@ -118,7 +118,7 @@ pub enum MsgTarget {
         ch_id: String,
         epoch: u64,
         my_pk: String,
-        auth: Option<[u8; 32]>,
+        auth: Option<zeroize::Zeroizing<[u8; 32]>>,
     },
 }
 
@@ -144,11 +144,12 @@ pub struct App {
     pub pending: Option<PendingOp>,
     pub busy: Option<BusyOp>,
     pub view_image: Option<(String, Vec<u8>)>,
-    pub secret: Option<[u8; 32]>,
+    pub secret: Option<zeroize::Zeroizing<[u8; 32]>>,
     pub live_write: bool,
     pub invite_mode: bool,
     pub invite_input: String,
     pub session: u64,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub should_quit: bool,
 }
 
@@ -187,6 +188,7 @@ impl App {
             invite_mode: false,
             invite_input: String::new(),
             session: 0,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             should_quit: false,
         }
     }
@@ -213,7 +215,8 @@ impl App {
     }
 
     pub fn login(&mut self) {
-        let v = self.login_input.trim().to_string();
+        use zeroize::Zeroizing;
+        let v: Zeroizing<String> = Zeroizing::new(self.login_input.trim().to_string());
         if v.is_empty() {
             self.login_error = Some("cole seu nsec (qualquer valor vale no mock)".to_string());
             return;
@@ -300,6 +303,9 @@ impl App {
         // Workers antigos morrem órfãos: resultados de outra sessão são ignorados.
         self.busy = None;
         self.pending = None;
+        // Cancela rede em voo (workers checam antes de assinar/enviar).
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.session = self.session.wrapping_add(1);
         self.live_write = false;
         self.npub = "npub1…não logado".to_string();
@@ -478,18 +484,20 @@ impl App {
         let (label, worker): (String, Box<dyn FnOnce() -> OpResult + Send>) = match op {
             PendingOp::Groups => {
                 let relay = self.relays.app_relays.first().cloned().unwrap_or_default();
-                let auth = self.secret;
+                let auth = self.secret.map(zeroize::Zeroizing::new);
+                let cancel = self.cancel.clone();
                 (
                     format!("grupos em {relay}"),
-                    Box::new(move || Self::op_fetch_groups(relay, auth)),
+                    Box::new(move || Self::op_fetch_groups(relay, auth, cancel)),
                 )
             }
             PendingOp::Messages => match self.snapshot_msg_target() {
                 Some(t) => {
                     let (ci, chi) = (self.sel_community, self.sel_channel);
+                    let cancel = self.cancel.clone();
                     (
                         "msgs…".to_string(),
-                        Box::new(move || Self::op_fetch_messages(t, ci, chi)),
+                        Box::new(move || Self::op_fetch_messages(t, ci, chi, cancel)),
                     )
                 }
                 None => {
@@ -505,16 +513,18 @@ impl App {
                     return;
                 }
                 if let (Some((relay, group)), Some(keys)) = (self.live_target(), self.live_keys()) {
+                    let cancel = self.cancel.clone();
                     (
                         "enviando…".to_string(),
-                        Box::new(move || Self::op_send(relay, group, keys, text, ci, chi)),
+                        Box::new(move || Self::op_send(relay, group, keys, text, ci, chi, cancel)),
                     )
                 } else if let (Some(cc), Some(keys)) =
                     (self.snapshot_concord_send(), self.live_keys())
                 {
+                    let cancel = self.cancel.clone();
                     (
                         "selando+enviando…".to_string(),
-                        Box::new(move || Self::op_concord_send(cc, keys, text, ci, chi)),
+                        Box::new(move || Self::op_concord_send(cc, keys, text, ci, chi, cancel)),
                     )
                 } else {
                     self.status = "sem chave ou sem canal live".to_string();
@@ -522,10 +532,13 @@ impl App {
                 }
             }
             PendingOp::Join => match (self.live_target(), self.live_keys()) {
-                (Some((relay, group)), Some(keys)) => (
-                    "join 9021…".to_string(),
-                    Box::new(move || Self::op_join(relay, group, keys)),
-                ),
+                (Some((relay, group)), Some(keys)) => {
+                    let cancel = self.cancel.clone();
+                    (
+                        "join 9021…".to_string(),
+                        Box::new(move || Self::op_join(relay, group, keys, cancel)),
+                    )
+                }
                 _ => {
                     self.status = "join exige grupo live + nsec".to_string();
                     return;
@@ -538,10 +551,11 @@ impl App {
                 if link.is_empty() {
                     return;
                 }
-                let auth = self.secret;
+                let auth = self.secret.map(zeroize::Zeroizing::new);
+                let cancel = self.cancel.clone();
                 (
                     "invite…".to_string(),
-                    Box::new(move || Self::op_invite(link, auth)),
+                    Box::new(move || Self::op_invite(link, auth, cancel)),
                 )
             }
             PendingOp::Image => match self.first_image_url() {
@@ -568,6 +582,19 @@ impl App {
         });
     }
 
+/// Linha de status de leitura: presença Some(vazia) = sala vazia de verdade;
+/// None = consulta falhou (não mente "0 na chamada").
+pub fn presence_status(n: usize, presence: Option<&[String]>) -> String {
+    match presence {
+        Some(ps) if !ps.is_empty() => {
+            let who: Vec<String> = ps.iter().map(|p| crate::models::short(p, 8)).collect();
+            format!("{n} msgs · 🔊 {} na chamada ({})", ps.len(), who.join(", "))
+        }
+        _ => format!("{n} msgs"),
+    }
+}
+
+impl App {
     /// Colhe resultado do worker (não bloqueia) e aplica no estado.
     pub fn poll_busy(&mut self) {
         let stale = matches!(&self.busy, Some(b) if b.session != self.session);
@@ -610,19 +637,7 @@ impl App {
                     }
                 }
                 self.msg_scroll = 0;
-                self.status = if presence_known && !presence.is_empty() {
-                    format!("{n} msgs")
-                } else {
-                    let who: Vec<String> = presence
-                        .iter()
-                        .map(|p| crate::models::short(p, 8))
-                        .collect();
-                    format!(
-                        "{n} msgs · 🔊 {} na chamada ({})",
-                        presence.len(),
-                        who.join(", ")
-                    )
-                };
+                self.status = Self::presence_status(n, presence_known.then_some(&presence[..]));
             }
             OpResult::Sent { ci, chi, text, id } => {
                 self.input.clear();
@@ -696,13 +711,14 @@ impl App {
         text: String,
         ci: usize,
         chi: usize,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> OpResult {
         use crate::concord::stream;
         let wrap = match stream::build_chat_wrap(&text, &cc.ch_id, cc.epoch, &keys.secret, &cc.sk) {
             Ok(w) => w,
             Err(e) => return OpResult::Failed(format!("falha ao selar: {e:#}")),
         };
-        match nostr::publish_concord(&cc.relays, wrap, Some(&keys)) {
+        match nostr::publish_concord(&cc.relays, wrap, Some(&keys), cancel) {
             Ok(n) => OpResult::Sent {
                 ci,
                 chi,
@@ -732,7 +748,7 @@ impl App {
                     .live_keys()
                     .map(|k| k.pubkey_hex.clone())
                     .unwrap_or_default(),
-                auth: self.secret,
+                auth: self.secret.map(zeroize::Zeroizing::new),
             });
         }
         match (&c.relay, &ch.live_group) {
@@ -740,18 +756,22 @@ impl App {
                 relay: r.clone(),
                 group: g.clone(),
                 voice: c.voice,
-                auth: self.secret,
+                auth: self.secret.map(zeroize::Zeroizing::new),
             }),
             _ => None,
         }
     }
 
     /// Grupos NIP-29 (kind 39000) → comunidades prontas (roda no worker).
-    fn op_fetch_groups(relay: String, auth: Option<[u8; 32]>) -> OpResult {
+    fn op_fetch_groups(
+        relay: String,
+        auth: Option<zeroize::Zeroizing<[u8; 32]>>,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> OpResult {
         if relay.is_empty() {
             return OpResult::Failed("sem relay configurado".to_string());
         }
-        match nostr::fetch_groups(&relay, auth) {
+        match nostr::fetch_groups(&relay, auth, cancel) {
             Ok(groups) => {
                 let list = groups
                     .into_iter()
@@ -787,7 +807,12 @@ impl App {
     }
 
     /// Lê mensagens no worker (NIP-29 ou Concord E2EE).
-    fn op_fetch_messages(t: MsgTarget, ci: usize, chi: usize) -> OpResult {
+    fn op_fetch_messages(
+        t: MsgTarget,
+        ci: usize,
+        chi: usize,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> OpResult {
         match t {
             MsgTarget::Nip29 {
                 relay,
@@ -797,11 +822,11 @@ impl App {
             } => {
                 // Presença: None = consulta falhou (≠ sala vazia).
                 let presence = if voice {
-                    nostr::fetch_participants(&relay, &group, auth).ok()
+                    nostr::fetch_participants(&relay, &group, auth, cancel.clone()).ok()
                 } else {
                     Some(Vec::new())
                 };
-                match nostr::fetch_messages(&relay, &group, 50, auth) {
+                match nostr::fetch_messages(&relay, &group, 50, auth, cancel.clone()) {
                     Ok(msgs) => OpResult::Chat {
                         ci,
                         chi,
@@ -834,7 +859,7 @@ impl App {
                 auth,
             } => {
                 use crate::concord::{invite as inv, stream};
-                let wraps = match inv::fetch_wraps(&relays, &pk, 50, auth) {
+                let wraps = match inv::fetch_wraps(&relays, &pk, 50, auth, cancel.clone()) {
                     Ok(w) => w,
                     Err(e) => return OpResult::Failed(format!("wraps: {e:#}")),
                 };
@@ -881,15 +906,20 @@ impl App {
         ci: usize,
         chi: usize,
     ) -> OpResult {
-        match nostr::send_chat(&relay, &keys, &group, &text) {
+        match nostr::send_chat(&relay, &keys, &group, &text, cancel) {
             Ok(id) => OpResult::Sent { ci, chi, text, id },
             Err(e) => OpResult::Failed(format!("falha ao publicar: {e:#}")),
         }
     }
 
     /// Join 9021 no worker.
-    fn op_join(relay: String, group: String, keys: nostr::Keys) -> OpResult {
-        match nostr::send_join(&relay, &keys, &group) {
+    fn op_join(
+        relay: String,
+        group: String,
+        keys: nostr::Keys,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> OpResult {
+        match nostr::send_join(&relay, &keys, &group, cancel) {
             Ok(id) => OpResult::Joined(id),
             Err(e) => OpResult::Failed(format!("falha no join: {e:#}")),
         }
@@ -948,7 +978,11 @@ impl App {
     }
 
     /// Invite Concord no worker: parse → bundle → control → comunidade pronta.
-    fn op_invite(link: String, auth: Option<[u8; 32]>) -> OpResult {
+    fn op_invite(
+        link: String,
+        auth: Option<zeroize::Zeroizing<[u8; 32]>>,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> OpResult {
         use crate::concord::invite as inv;
         let p = match inv::parse_invite_link(&link) {
             Some(p) => p,
@@ -958,7 +992,7 @@ impl App {
                 )
             }
         };
-        let ev = match inv::fetch_bundle_event(&p.relays, &p.link_signer, auth) {
+        let ev = match inv::fetch_bundle_event(&p.relays, &p.link_signer, auth, cancel.clone()) {
             Ok(ev) => ev,
             Err(e) => return OpResult::Failed(format!("bundle não achado: {e:#}")),
         };
@@ -970,15 +1004,15 @@ impl App {
         let primary = b.relays.first().cloned().unwrap_or_default();
         // Control plane: descobre canais (públicos derivam do root).
         use crate::concord::{control, derive};
-        let root: Option<[u8; 32]> = hex::decode(&b.community_root)
+        let root: Option<zeroize::Zeroizing<[u8; 32]>> = hex::decode(&b.community_root)
             .ok()
             .and_then(|v| v.try_into().ok());
-        let cid: Option<[u8; 32]> = hex::decode(&b.community_id)
+        let cid: Option<zeroize::Zeroizing<[u8; 32]>> = hex::decode(&b.community_id)
             .ok()
             .and_then(|v| v.try_into().ok());
         let folded: Vec<control::ControlChannel> = match (root, cid) {
             (Some(r), Some(c)) => {
-                control::fetch_control_channels(&b.relays, &r, &hex::encode(c), b.root_epoch, auth)
+                control::fetch_control_channels(&b.relays, &r, &hex::encode(c), b.root_epoch, auth, cancel)
                     .unwrap_or_default()
             }
             _ => Vec::new(),
@@ -1060,5 +1094,23 @@ impl App {
             voice: false,
             channels,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presenca_nao_mente() {
+        // Sala com gente → mostra.
+        assert_eq!(
+            App::presence_status(5, Some(&["aabbccddeeff00112233445566778899".to_string()])),
+            "5 msgs · 🔊 1 na chamada (aabbccdd)"
+        );
+        // Sala vazia de verdade → sem 🔊.
+        assert_eq!(App::presence_status(5, Some(&[])), "5 msgs");
+        // Consulta falhou → sem 🔊 (não mente "0 na chamada").
+        assert_eq!(App::presence_status(5, None), "5 msgs");
     }
 }

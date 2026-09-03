@@ -9,14 +9,14 @@ fn main() -> anyhow::Result<()> {
     let cmd = std::env::args().nth(2).expect("cmd");
     match cmd.as_str() {
         "groups" => {
-            for g in nostr::fetch_groups(&relay, None)? {
+            for g in nostr::fetch_groups(&relay, None, nostr::never_cancel())? {
                 let about: String = g.about.chars().take(60).collect();
                 println!("{} [{}] {about}", g.id, g.name);
             }
         }
         "msgs" => {
             let group = std::env::args().nth(3).expect("grupo");
-            for m in nostr::fetch_messages(&relay, &group, 20, None)? {
+            for m in nostr::fetch_messages(&relay, &group, 20, None, nostr::never_cancel())? {
                 println!(
                     "[{}] {}: {}",
                     m.time,
@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
         }
         "voice" => {
             let group = std::env::args().nth(3).expect("grupo");
-            let ps = nostr::fetch_participants(&relay, &group, None)?;
+            let ps = nostr::fetch_participants(&relay, &group, None, nostr::never_cancel())?;
             println!("🔊 {} na chamada em {group}", ps.len());
             for p in ps {
                 println!("  {p}");
@@ -37,14 +37,20 @@ fn main() -> anyhow::Result<()> {
             let group = std::env::args().nth(3).expect("grupo");
             let k = nostr::generate()?;
             println!("identidade: {}", k.pubkey_hex);
-            println!("join: {}", nostr::send_join(&relay, &k, &group)?);
+            println!(
+                "join: {}",
+                nostr::send_join(&relay, &k, &group, nostr::never_cancel())?
+            );
         }
         "send" => {
             let group = std::env::args().nth(3).expect("grupo");
             let text: String = std::env::args().skip(4).collect::<Vec<_>>().join(" ");
             let k = nostr::generate()?;
             println!("identidade: {}", k.pubkey_hex);
-            println!("send: {}", nostr::send_chat(&relay, &k, &group, &text)?);
+            println!(
+                "send: {}",
+                nostr::send_chat(&relay, &k, &group, &text, nostr::never_cancel())?
+            );
         }
         _ => anyhow::bail!("cmd: groups|msgs|voice|join|send"),
     }

@@ -98,10 +98,11 @@ fn suspend_and_view(
 }
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    // Ctrl+C / Ctrl+Q sempre sai
+    // Ctrl+C / Ctrl+Q sempre sai (via logout: zeroíza segredos)
     if mods.contains(KeyModifiers::CONTROL)
         && matches!(code, KeyCode::Char('c') | KeyCode::Char('q'))
     {
+        app.logout();
         app.should_quit = true;
         return;
     }
