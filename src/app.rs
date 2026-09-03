@@ -87,7 +87,14 @@ pub struct BusyOp {
     pub rx: std::sync::mpsc::Receiver<OpResult>,
 }
 
-/// Alvo de leitura de mensagens (snapshot p/ worker).
+/// Snapshot p/ envio Concord (tudo clonado p/ worker).
+#[derive(Clone)]
+pub struct ConcordSend {
+    pub relays: Vec<String>,
+    pub sk: [u8; 32],
+    pub ch_id: String,
+    pub epoch: u64,
+}
 #[derive(Clone)]
 pub enum MsgTarget {
     Nip29 {
@@ -359,12 +366,14 @@ impl App {
             self.status = "DM mock local (NIP-17/44 no roadmap)".to_string();
             return;
         }
-        // Fase 2: canal live + chave → publica no relay via pending.
-        let is_live = matches!(
+        // Canal live (NIP-29 ou Concord com chave) + nsec → publica via pending.
+        // Sem chave, o rascunho fica no input (modo leitura).
+        let can_send = matches!(
             (self.current_community(), self.current_channel()),
-            (Some(c), Some(ch)) if c.relay.is_some() && ch.live_group.is_some()
+            (Some(c), Some(ch))
+                if (c.relay.is_some() && ch.live_group.is_some()) || ch.stream_sk.is_some()
         );
-        if is_live {
+        if can_send {
             if self.secret.is_some() {
                 self.status = "enviando ao relay…".to_string();
                 self.pending = Some(PendingOp::Send);
@@ -447,21 +456,30 @@ impl App {
                     return;
                 }
             },
-            PendingOp::Send => match (self.live_target(), self.live_keys()) {
-                (Some((relay, group)), Some(keys)) => {
-                    let text = self.input.trim().to_string();
-                    let (ci, chi) = (self.sel_community, self.sel_channel);
-                    self.input_mode = false;
+            PendingOp::Send => {
+                let text = self.input.trim().to_string();
+                let (ci, chi) = (self.sel_community, self.sel_channel);
+                self.input_mode = false;
+                if text.is_empty() {
+                    return;
+                }
+                if let (Some((relay, group)), Some(keys)) = (self.live_target(), self.live_keys()) {
                     (
                         "enviando…".to_string(),
                         Box::new(move || Self::op_send(relay, group, keys, text, ci, chi)),
                     )
-                }
-                _ => {
-                    self.status = "sem chave ou sem grupo live".to_string();
+                } else if let (Some(cc), Some(keys)) =
+                    (self.snapshot_concord_send(), self.live_keys())
+                {
+                    (
+                        "selando+enviando…".to_string(),
+                        Box::new(move || Self::op_concord_send(cc, keys, text, ci, chi)),
+                    )
+                } else {
+                    self.status = "sem chave ou sem canal live".to_string();
                     return;
                 }
-            },
+            }
             PendingOp::Join => match (self.live_target(), self.live_keys()) {
                 (Some((relay, group)), Some(keys)) => (
                     "join 9021…".to_string(),
@@ -561,7 +579,45 @@ impl App {
         }
     }
 
-    /// Snapshot do alvo de leitura p/ worker (NIP-29 ou Concord).
+    /// Snapshot p/ envio Concord (relays + chave da stream do canal).
+    fn snapshot_concord_send(&self) -> Option<ConcordSend> {
+        let (c, ch) = (self.current_community()?, self.current_channel()?);
+        let sk: [u8; 32] = hex::decode(ch.stream_sk.as_ref()?).ok()?.try_into().ok()?;
+        let id = hex::decode(ch.stream_id.as_ref()?).ok()?;
+        if id.len() != 32 {
+            return None;
+        }
+        Some(ConcordSend {
+            relays: c.relays.clone(),
+            sk,
+            ch_id: ch.stream_id.clone()?,
+            epoch: ch.stream_epoch?,
+        })
+    }
+
+    /// Envio Concord no worker: seal+wrap e publica nos relays.
+    fn op_concord_send(
+        cc: ConcordSend,
+        keys: nostr::Keys,
+        text: String,
+        ci: usize,
+        chi: usize,
+    ) -> OpResult {
+        use crate::concord::stream;
+        let wrap = match stream::build_chat_wrap(&text, &cc.ch_id, cc.epoch, &keys.secret, &cc.sk) {
+            Ok(w) => w,
+            Err(e) => return OpResult::Failed(format!("falha ao selar: {e:#}")),
+        };
+        match nostr::publish_concord(&cc.relays, wrap, Some(&keys)) {
+            Ok(n) => OpResult::Sent {
+                ci,
+                chi,
+                text,
+                id: format!("wrap em {n} relays"),
+            },
+            Err(e) => OpResult::Failed(format!("falha ao publicar: {e:#}")),
+        }
+    }
     fn snapshot_msg_target(&self) -> Option<MsgTarget> {
         let (c, ch) = (self.current_community()?, self.current_channel()?);
         if let (Some(sk), Some(id), Some(ep)) = (&ch.stream_sk, &ch.stream_id, ch.stream_epoch) {

@@ -331,13 +331,23 @@ pub fn sign_event(
     tags: Vec<Vec<String>>,
     content: &str,
 ) -> anyhow::Result<serde_json::Value> {
+    sign_event_with(secret, kind, tags, content, chrono::Utc::now().timestamp())
+}
+
+/// Variante com timestamp explícito (testes, rumors com ms).
+pub fn sign_event_with(
+    secret: &[u8; 32],
+    kind: u64,
+    tags: Vec<Vec<String>>,
+    content: &str,
+    created_at: i64,
+) -> anyhow::Result<serde_json::Value> {
     use sha2::Digest;
     let secp = secp256k1::Secp256k1::new();
     let sk = secp256k1::SecretKey::from_slice(secret)?;
     let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
     let (xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
     let pubkey = format!("{xonly}");
-    let created_at = chrono::Utc::now().timestamp();
     let commit = serde_json::json!([0, pubkey, created_at, kind, tags, content]);
     let serialized = serde_json::to_string(&commit)?;
     let digest = sha2::Sha256::digest(serialized.as_bytes());
@@ -447,6 +457,26 @@ pub fn publish(
         Ok(r) => r,
         Err(_) => anyhow::bail!("timeout publicando em {relay_url}"),
     }
+}
+
+/// Publica wrap Concord em todos os relays; basta 1 OK (retorna quantos).
+pub fn publish_concord(
+    relays: &[String],
+    wrap: serde_json::Value,
+    keys: Option<&Keys>,
+) -> anyhow::Result<usize> {
+    let mut oks = 0usize;
+    let mut last_err = anyhow::anyhow!("sem relays");
+    for r in relays {
+        match publish(r, keys, wrap.clone(), Duration::from_secs(20)) {
+            Ok(_) => oks += 1,
+            Err(e) => last_err = e,
+        }
+    }
+    if oks == 0 {
+        return Err(anyhow::anyhow!("nenhum relay aceitou: {last_err:#}"));
+    }
+    Ok(oks)
 }
 
 /// Chat no grupo live (kind 9 + tag h).

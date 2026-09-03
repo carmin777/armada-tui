@@ -195,8 +195,79 @@ pub(crate) fn open_stream_event(
     })
 }
 
-/// Abre um wrap da stream, validando tudo. `stream_sk` = segredo da stream
-/// (ex: channelGroupKey().sk); `stream_pk` = hex x-only do autor fixo.
+/// Constrói rumor+seal(20013)+wrap(1059) de chat, assinados (autor + stream).
+/// Espelha `sealRumor`+`wrapSeal` p/ kind 9 com binding channel/epoch/ms.
+pub fn build_chat_wrap(
+    text: &str,
+    channel_id: &str,
+    epoch: u64,
+    author_secret: &[u8; 32],
+    stream_sk: &[u8; 32],
+) -> anyhow::Result<serde_json::Value> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    build_chat_wrap_at(text, channel_id, epoch, now_ms, author_secret, stream_sk)
+}
+
+pub fn build_chat_wrap_at(
+    text: &str,
+    channel_id: &str,
+    epoch: u64,
+    now_ms: i64,
+    author_secret: &[u8; 32],
+    stream_sk: &[u8; 32],
+) -> anyhow::Result<serde_json::Value> {
+    use crate::nostr::sign_event_with;
+    let secp = secp256k1::Secp256k1::new();
+    let ask = secp256k1::SecretKey::from_slice(author_secret)?;
+    let (author_x, _) =
+        secp256k1::XOnlyPublicKey::from_keypair(&secp256k1::Keypair::from_secret_key(&secp, &ask));
+    let author = format!("{author_x}");
+    let ssk = secp256k1::SecretKey::from_slice(stream_sk)?;
+    let (stream_x, _) =
+        secp256k1::XOnlyPublicKey::from_keypair(&secp256k1::Keypair::from_secret_key(&secp, &ssk));
+    let stream_pk = format!("{stream_x}");
+    let conv = nip44::conversation_key(stream_sk, &stream_pk)?;
+    let secs = now_ms.div_euclid(1000);
+    let ms = now_ms.rem_euclid(1000);
+    // Rumor (unsigned): id = hash canônico.
+    let rumor_tags = serde_json::json!([
+        ["channel", channel_id],
+        ["epoch", epoch.to_string()],
+        ["ms", ms.to_string()],
+    ]);
+    let rumor_id = hex::encode(event_id(&author, secs, 9, &rumor_tags, text)?);
+    let rumor = serde_json::json!({
+        "kind": 9, "pubkey": author, "created_at": secs,
+        "tags": rumor_tags, "content": text, "id": rumor_id,
+    });
+    // Seal 20013: rumor re-criptografado, assinado pelo autor real.
+    let seal_content = nip44::encrypt_with_nonce(
+        &conv,
+        &random_nonce()?,
+        serde_json::to_string(&rumor)?.as_bytes(),
+    )?;
+    let seal = sign_event_with(author_secret, 20013, Vec::new(), &seal_content, secs)?;
+    // Wrap 1059: seal criptografado, assinado pela stream.
+    let wrap_content = nip44::encrypt_with_nonce(
+        &conv,
+        &random_nonce()?,
+        serde_json::to_string(&seal)?.as_bytes(),
+    )?;
+    let wrap = sign_event_with(
+        stream_sk,
+        KIND_WRAP,
+        vec![vec!["p".to_string(), stream_pk]],
+        &wrap_content,
+        secs,
+    )?;
+    Ok(wrap)
+}
+
+fn random_nonce() -> anyhow::Result<[u8; 32]> {
+    let mut n = [0u8; 32];
+    getrandom::getrandom(&mut n)?;
+    Ok(n)
+}
 pub fn open_wrap(
     wrap: &serde_json::Value,
     stream_sk: &[u8; 32],
@@ -256,6 +327,33 @@ mod tests {
         assert_eq!(o.author, fixture::AUTHOR_PK);
         assert_eq!(o.content, "hello armada-tui 🌊");
         assert_eq!(o.ms, 1719800000417);
+    }
+
+    #[test]
+    fn chat_write_roundtrip() {
+        // Escreve com nossas chaves e abre com nosso leitor (mesma semântica
+        // validada contra a referência nos testes acima).
+        let author = [7u8; 32];
+        let sk: [u8; 32] = hex::decode(fixture::STREAM_SK).unwrap().try_into().unwrap();
+        let w = build_chat_wrap_at(
+            "oi e2e",
+            fixture::CHANNEL_ID,
+            0,
+            1719800000417,
+            &author,
+            &sk,
+        )
+        .unwrap();
+        assert_eq!(
+            w["pubkey"],
+            serde_json::Value::String(fixture::STREAM_PK.to_string())
+        );
+        assert_eq!(w["kind"], serde_json::Value::from(1059));
+        let o = open_wrap(&w, &sk, fixture::STREAM_PK, fixture::CHANNEL_ID, 0).unwrap();
+        assert_eq!(o.kind, 9);
+        assert_eq!(o.content, "oi e2e");
+        assert_eq!(o.ms, 1719800000417);
+        assert_eq!(o.author, fixture::AUTHOR_PK);
     }
 
     #[test]
