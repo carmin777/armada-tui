@@ -43,10 +43,28 @@ fn main() -> anyhow::Result<()> {
                     .nth(2)
                     .unwrap_or_else(|| "general".to_string());
                 if let Some(ch) = cc.iter().find(|c| c.name == want && !c.is_private) {
-                    use armada_tui::concord::derive;
+                    use armada_tui::concord::{derive, stream};
+                    use armada_tui::nostr;
                     let id: [u8; 32] = h32(&ch.id)?;
                     let g =
                         derive::group_key(derive::label::CHANNEL, &root, &id, Some(b.root_epoch));
+                    // --send "texto": posta wrap selado com identidade throwaway.
+                    if std::env::args().nth(3).as_deref() == Some("--send") {
+                        let text = std::env::args().nth(4).expect("texto após --send");
+                        let author = nostr::generate()?;
+                        let wrap = stream::build_chat_wrap(
+                            &text,
+                            &ch.id,
+                            b.root_epoch,
+                            &author.secret,
+                            &g.sk,
+                        )?;
+                        let n = nostr::publish_concord(&b.relays, wrap, Some(&author))?;
+                        println!(
+                            "ENVIADO a {n} relays como {}: {text}",
+                            &author.pubkey_hex[..8]
+                        );
+                    }
                     println!(
                         "lendo #{} (stream {}…)…",
                         want,
