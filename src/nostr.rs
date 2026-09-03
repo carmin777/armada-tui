@@ -83,7 +83,7 @@ pub(crate) fn req_events(
                 });
                 rx2.recv_timeout(Duration::from_secs(10))
                     .map_err(|_| anyhow::anyhow!("connect timeout (10s)"))??
-            }?;
+            };
             arm_timeouts(&mut socket);
             socket.send(tungstenite::Message::Text(req))?;
             let mut events = Vec::new();
@@ -496,7 +496,7 @@ pub fn publish(
                 });
                 rx2.recv_timeout(Duration::from_secs(10))
                     .map_err(|_| anyhow::anyhow!("connect timeout (10s)"))??
-            }?;
+            };
             arm_timeouts(&mut socket);
             let mut flow = PublishFlow::new(id.clone());
             debug_assert!(matches!(flow.start(), FlowAction::SendEvent));
@@ -581,7 +581,7 @@ pub fn publish_concord(
     let mut oks = 0usize;
     let mut last_err = anyhow::anyhow!("sem relays");
     for r in relays {
-        match publish(r, keys, wrap.clone(), Duration::from_secs(20)) {
+        match publish(&r, keys, wrap.clone(), Duration::from_secs(20)) {
             Ok(_) => oks += 1,
             Err(e) => last_err = e,
         }
