@@ -1,15 +1,5 @@
-mod app;
-mod concord;
-mod kitty;
-mod mock;
-mod models;
-mod nostr;
-mod ui;
-
-use std::io;
-use std::time::Duration;
-
-use app::{App, Screen};
+use armada_tui::app::{App, Screen};
+use armada_tui::{app, kitty, ui};
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -17,6 +7,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use std::io;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
