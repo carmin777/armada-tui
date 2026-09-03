@@ -17,7 +17,12 @@ fn main() -> anyhow::Result<()> {
     std::thread::sleep(std::time::Duration::from_secs(8));
     // Leitura COM auth (relays protegem 1059 via NIP-42, NIP-59).
     let raw: [u8; 32] = *me.secret;
-    let msgs = dm::fetch_threads(&relays, &raw, Some(me.secret.clone()), nostr::never_cancel())?;
+    let msgs = dm::fetch_threads(
+        &relays,
+        &raw,
+        Some(me.secret.clone()),
+        nostr::never_cancel(),
+    )?;
     let mine: Vec<_> = msgs.iter().filter(|m| m.content == text).collect();
     println!("lidas: {} threads?, {} com o texto", msgs.len(), mine.len());
     if mine.is_empty() {
