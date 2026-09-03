@@ -286,7 +286,7 @@ impl App {
         for c in &mut self.communities {
             for ch in &mut c.channels {
                 if let Some(mut k) = ch.stream_sk.take() {
-                    k.zeroize();
+                    Self::wipe_string(&mut k);
                 }
             }
         }
@@ -457,7 +457,7 @@ impl App {
     fn live_keys(&self) -> Option<nostr::Keys> {
         let secret = self.secret.clone()?;
         let secp = secp256k1::Secp256k1::new();
-        let sk = secp256k1::SecretKey::from_slice(&secret).ok()?;
+        let sk = secp256k1::SecretKey::from_slice(AsRef::<[u8]>::as_ref(&secret)).ok()?;
         let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
         let (xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&kp);
         // npub não é necessário aqui; reconstrói o mínimo para assinar.
@@ -821,11 +821,11 @@ impl App {
             } => {
                 // Presença: None = consulta falhou (≠ sala vazia).
                 let presence = if voice {
-                    nostr::fetch_participants(&relay, &group, auth, cancel.clone()).ok()
+                    nostr::fetch_participants(&relay, &group, auth.clone(), cancel.clone()).ok()
                 } else {
                     Some(Vec::new())
                 };
-                match nostr::fetch_messages(&relay, &group, 50, auth, cancel.clone()) {
+                match nostr::fetch_messages(&relay, &group, 50, auth.clone(), cancel.clone()) {
                     Ok(msgs) => OpResult::Chat {
                         ci,
                         chi,
@@ -992,7 +992,12 @@ impl App {
                 )
             }
         };
-        let ev = match inv::fetch_bundle_event(&p.relays, &p.link_signer, auth, cancel.clone()) {
+        let ev = match inv::fetch_bundle_event(
+            &p.relays,
+            &p.link_signer,
+            auth.clone(),
+            cancel.clone(),
+        ) {
             Ok(ev) => ev,
             Err(e) => return OpResult::Failed(format!("bundle não achado: {e:#}")),
         };

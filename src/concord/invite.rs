@@ -226,7 +226,7 @@ pub fn fetch_bundle_event(
             "armada-invite",
             filter.clone(),
             std::time::Duration::from_secs(12),
-            auth,
+            auth.clone(),
             cancel.clone(),
         ) {
             Ok(evs) => {
@@ -391,7 +391,7 @@ pub fn fetch_wraps(
             "armada-wraps",
             filter.clone(),
             std::time::Duration::from_secs(12),
-            auth,
+            auth.clone(),
             cancel.clone(),
         ) {
             Ok(evs) => {

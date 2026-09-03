@@ -806,7 +806,7 @@ pub fn publish_concord(
     }
     let (tx, rx) = mpsc::channel();
     for r in relays {
-        let (tx, wrap, keys) = (tx.clone(), wrap.clone(), keys.cloned());
+        let (tx, wrap, keys, cancel) = (tx.clone(), wrap.clone(), keys.cloned(), cancel.clone());
         std::thread::spawn(move || {
             let out = publish(
                 &r,
