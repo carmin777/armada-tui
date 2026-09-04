@@ -8,3 +8,4 @@ pub mod netpolicy;
 pub mod nostr;
 pub mod parity;
 pub mod ui;
+pub mod voice;

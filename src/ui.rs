@@ -432,13 +432,17 @@ fn render_help(f: &mut Frame, _app: &mut App, area: ratatui::layout::Rect) {
         Line::from("o logout (na tela Settings) · ⚡ = comunidade live"),
         Line::from(""),
         Line::from("Paridade com Electron (roadmap):"),
+        Line::from("- feito: leitura/escrita NIP-29 + NIP-42, join, Concord E2EE e DMs NIP-17/44"),
         Line::from(
-            "- feito: layout 3 painéis, DMs, Discover, Projects, Inbox, Settings, auth mock",
+            "- feito: invites Concord, controle de canais, presença 39004 e viewer PNG Kitty",
         ),
-        Line::from("- fase 1: leitura NIP-29 real (39000 + kinds c/ tag h) · viewer PNG via kitty"),
         Line::from(
-            "- falta: NIP-42 auth p/ grupos privados, escrita, E2EE Concord, LiveKit voz, zaps",
+            "- parcial: Discover, Projects, Inbox, edição de relays e mídia são mock/limitados",
         ),
+        Line::from(
+            "- em desenvolvimento: token LiveKit headless; áudio WebRTC ainda não existe no TUI",
+        ),
+        Line::from("- falta: NIP-07/NIP-46, rekey/grants completos, upload Blossom, zaps e busca"),
     ];
     f.render_widget(
         Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" ajuda ")),

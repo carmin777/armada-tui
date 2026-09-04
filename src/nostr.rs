@@ -1,11 +1,11 @@
-//! Nostr mínimo p/ fase 1: leitura pública NIP-29 via WebSocket.
+//! Cliente Nostr mínimo: leitura/escrita NIP-29 via WebSocket.
 //!
 //! Sem dependência de SDK pesado: `tungstenite` sync + thread com timeout.
 //!
 //! - Grupos:  `["REQ", sub, {"kinds":[39000]}]` → metadados (d/name/about/picture)
 //! - Mensagens: `["REQ", sub, {"kinds":[1,7,9,11,1111], "#h":[group-id], "limit":N}]`
 //!
-//! Grupos privados (NIP-42 auth) e escrita/E2EE ficam p/ fases seguintes.
+//! Inclui NIP-42 quando o relay exige autenticação; não é um SDK Nostr completo.
 
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};

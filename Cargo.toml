@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Terminal client (Ratatui) inspirado no Armada da Soapbox — comunidades E2EE Concord + grupos NIP-29"
 license = "AGPL-3.0-or-later"
+readme = "README.md"
+repository = "https://github.com/carmin777/armada-tui"
 
 [dependencies]
 ratatui = "0.30"

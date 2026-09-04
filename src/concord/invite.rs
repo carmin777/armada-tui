@@ -446,7 +446,7 @@ mod tests {
         );
         // Token errado → MAC falha.
         assert!(open_bundle(&ev, &p.link_signer, &[0xbb; 16], 1719800000000).is_err());
-        // Expirado (agora em 2026) → a fixture é de 2024 sem expires_at... passa.
+        // A fixture não tem expires_at; continua válida como vetor determinístico.
         // Revogado seria vsk 9 — coberto pelo parser.
     }
 }

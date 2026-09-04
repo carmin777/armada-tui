@@ -3,3 +3,20 @@ e2e/node_modules/
 e2e/*.png
 e2e/*.log
 *.log
+
+# Metadados locais do ambiente de desenvolvimento
+/.agents/
+/.codex/
+
+# Configuração local e material sensível
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.nsec
+*.secret
+secrets/
